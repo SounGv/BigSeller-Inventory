@@ -1,0 +1,41 @@
+{
+  "name": "bigseller-inventory-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright browser automation for syncing BigSeller inventory and sales data into Google Sheets",
+  "type": "module",
+  "scripts": {
+    "login:bigseller": "tsx scripts/login-bigseller.ts",
+    "sync:inventory": "tsx scripts/sync-inventory.ts",
+    "sync:sales": "tsx scripts/sync-sales.ts",
+    "sync:all": "tsx scripts/sync-all.ts",
+    "validate": "tsx scripts/validate.ts",
+    "sync:bigseller": "tsx scripts/sync-bigseller.ts",
+    "validate:sync": "tsx scripts/validate-sync.ts",
+    "plan:moves": "tsx scripts/plan-moves.ts",
+    "export:moves": "tsx scripts/export-moves.ts",
+    "validate:moves": "tsx scripts/validate-moves.ts",
+    "preview:moves": "tsx scripts/preview-moves.ts",
+    "import:moves": "tsx scripts/import-moves.ts",
+    "capture:line-group-id": "tsx scripts/line-webhook-capture.ts",
+    "capture:line-user-ids": "tsx scripts/capture-line-user-ids.ts",
+    "line:webhook": "tsx scripts/line-webhook-capture.ts",
+    "line:test": "tsx scripts/line-test.ts",
+    "line:status": "tsx scripts/line-status.ts",
+    "import:carton-qty": "tsx scripts/import-carton-qty.ts",
+    "bot:line": "tsx scripts/line-command-bot.ts",
+    "test": "playwright test",
+    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^22.7.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

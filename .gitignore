@@ -1,0 +1,23 @@
+node_modules/
+dist/
+
+# Playwright
+playwright/.auth/
+playwright-report/
+test-results/
+blob-report/
+
+# Downloaded reports / runtime artifacts
+tmp/
+logs/
+output/
+*.log
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
+
+# Local Claude Code config (personal, not project-scoped)
+.claude/
