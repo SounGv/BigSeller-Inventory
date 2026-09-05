@@ -1,0 +1,24 @@
+---
+description: Fix Claude Code login failures in Cursor (auth 400 / logged out)
+alwaysApply: true
+---
+
+# Claude Code Login (Cursor)
+
+When the user cannot sign in to Claude Code (e.g. "Request failed with status code 400"), or auth is missing:
+
+1. Prefer **terminal login**, not the extension UI:
+   ```powershell
+   $env:Path += ";$env:APPDATA\npm"
+   claude auth login --claudeai
+   ```
+2. Confirm with `claude auth status` — expect `loggedIn: true`.
+3. If the panel still errors: `Ctrl+Shift+P` → `Developer: Reload Window`.
+
+## Known setup on this machine
+
+- CLI: `@anthropic-ai/claude-code` (global npm), command `claude`
+- Extension: `anthropic.claude-code`
+- Account: `soun.gv@gadgetvilla.co.th` (Gadgetvilla Team)
+
+Do not dig into BigSeller project code for Claude login issues — it is IDE/auth, not app code.
