@@ -1,0 +1,497 @@
+import type { Locator, Page } from '@playwright/test';
+import { dismissOrderPageOverlays } from './order-page-overlays.js';
+import { clickThroughGuide } from './dismiss-language-guide.js';
+import {
+  collectRawOrderRows,
+  goToNextOrderPage,
+  NEW_ORDERS_URL,
+  ORDER_COLUMN,
+  readFilterPillCount,
+  readWarehouseFilterOptions,
+  selectFilterPill,
+  waitForListSettled,
+  setMaxPageSize,
+  setWarehouseFilter,
+  type RawOrderRow,
+  type WarehouseFilterOption,
+} from './new-orders-dom.js';
+import { humanDelay } from '../utils/human-delay.js';
+import { logger } from '../utils/logger.js';
+
+/** One order's priority-relevant fields, as read off the page (spec §3). Raw text is kept so an unparsed field is diagnosable from the dry-run log instead of guessed at. */
+export interface ScannedOrderRow {
+  orderId: string;
+  orderNo: string;
+  rawShippingCell: string;
+  rawRowText: string;
+  statusText: string;
+  urgentFlag: boolean;
+  /** Which signal produced `urgentFlag` — '' when not flagged. Logged so the real บาร์ด่วนพิเศษ markup can be confirmed on the first live day. */
+  urgentSignal: string;
+  /** Raw text following "กำหนดส่ง", before date parsing. null when the label isn't present in the row at all. */
+  deliveryDateRaw: string | null;
+  warehouse: string;
+}
+
+export interface OrderState {
+  present: boolean;
+  statusText: string;
+  hasConfirmControl: boolean;
+}
+
+export interface ConfirmResult {
+  confirmed: boolean;
+  /** What actually happened, for the audit log — including "clicked but could not verify", which is NOT reported as success. */
+  note: string;
+}
+
+/**
+ * The urgent indicator (spec §3 `urgent_flag`, "บาร์ด่วนพิเศษ") has NOT been
+ * confirmed against real markup. Two independent signals are checked — a
+ * class containing "urgent" anywhere in the row, and these keywords in the row
+ * text — and whichever matched is recorded in `urgentSignal` so the real one
+ * can be confirmed from a day of dry-run logs and this list then narrowed.
+ *
+ * Failure modes both stay safe in phase 1: a false negative on a Seller
+ * Delivery order falls through to the กำหนดส่ง date rule, and a false positive
+ * only reorders within a tier (tier 0 does not act live this phase).
+ */
+const URGENT_TEXT_SIGNALS = ['ด่วนพิเศษ', 'ด่วน'];
+
+/** BigSeller order ids are its own internal numeric ids; anything else must never reach a CSS attribute selector. */
+const SAFE_ORDER_ID = /^[A-Za-z0-9_-]+$/;
+
+/** How long to wait for BigSeller to reflect a confirmation. Generous on purpose — see confirmOrder. */
+const CONFIRM_VERIFY_TIMEOUT_MS = Number(process.env.WAVE_ENGINE_CONFIRM_VERIFY_MS ?? 30000);
+
+/**
+ * Page Object for the wave-engine's read of `order/index.htm?status=new`:
+ * the four priority fields per order (spec §3) plus the confirm action.
+ *
+ * Separate from `new-orders-page.ts` (which reads SKU lines off the same page
+ * for the order-demand sync) because the two need different fields and this
+ * one can click. Both share the confirmed DOM facts in `new-orders-dom.ts`.
+ *
+ * Field-level provenance, checked against real rows 2026-09-10 via
+ * `npm run wave-engine -- --dump`:
+ *  - CONFIRMED: the 9-column layout (new-orders-dom.ts), the logistics channel
+ *    reading from cell [5] ("Seller Delivery เพิ่มข้อมูลขนส่ง",
+ *    "Shopee-TH-Instant Delivery - ส่งทันที (แพ็ก 2 ชั่วโมง) [ Pick up ]"), the
+ *    status text in cell [7] ("คำสั่งซื้อใหม่"), and the confirm control's
+ *    `autoid` (see confirmControl).
+ *  - ANSWERS spec §8 q1, negatively: "กำหนดส่ง" does NOT appear in the list
+ *    view at all. Real Seller Delivery rows show "Seller Delivery
+ *    เพิ่มข้อมูลขนส่ง" (add shipping info) with no date anywhere in the row, so
+ *    `deliveryDateRaw` is null for every one of them and they ALL route to the
+ *    manual queue. That is the spec §7 behaviour, but it means tier 0 cannot be
+ *    automated from this page alone — the date must come from the order-detail
+ *    view or an API before tier 0 can ever act.
+ *  - STILL UNCONFIRMED: the บาร์ด่วนพิเศษ urgent marker. No sampled row carried
+ *    an "urgent" class or either keyword. Cell [4] does carry an SLA countdown
+ *    ("Expire 11 ก.ย. 2026 12:00 หมดอายุใน 19 ชั่วโมง") which is absent on
+ *    Seller Delivery rows ("Expire --"), but treating any countdown as urgent
+ *    would flag nearly every marketplace order, so it is deliberately NOT wired
+ *    up until someone confirms what the real indicator looks like.
+ *  - UNRELIABLE: the warehouse code. Found only inside cell [2]'s recipient
+ *    text, and inconsistently formatted ("(STOCK-3 คลังออนไลน์)" vs "(คลัง3
+ *    ออนไลน์)"). Log-only — BigSeller does the wave's zone split itself.
+ */
+export class BigSellerOrderPriorityPage {
+  constructor(private readonly page: Page) {}
+
+  async goto(): Promise<void> {
+    await this.page.goto(NEW_ORDERS_URL, { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(2500);
+    await dismissOrderPageOverlays(this.page);
+  }
+
+  /** Reloads the list so a stale DOM can't hide a confirmation someone made by hand since the last scan (idempotency, spec §7). */
+  async refresh(): Promise<void> {
+    await this.page.reload({ waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(2500);
+    await dismissOrderPageOverlays(this.page);
+  }
+
+  /** Narrows the list with the "โลจิสติกส์" filter row, so the urgent loop can stay a cheap filter+count instead of walking the whole table (spec §5a). Throws if the pill isn't there — caller decides whether to fall back. */
+  async selectLogisticsFilter(pillLabel: string): Promise<void> {
+    await selectFilterPill(this.page, 'โลจิสติกส์', pillLabel);
+  }
+
+  /**
+   * Order ids belonging to one store, collected by filtering to it.
+   *
+   * A row does not say which store it came from — the same limitation
+   * order-demand-service.ts already works around by scraping per store filter
+   * and classifying by order-number membership. Uses a full (paginated) scan
+   * rather than a light one: the reserved store held 61 orders on 2026-09-11,
+   * above the default 50/page, and a light scan would silently return a subset
+   * — which for an EXCLUSION list means orders wrongly treated as shippable.
+   *
+   * Resets the store filter to ทั้งหมด afterwards so the caller's own scan is
+   * not silently narrowed.
+   */
+  async collectStoreOrderIds(storeName: string): Promise<Set<string>> {
+    await selectFilterPill(this.page, 'ร้านค้า', storeName);
+    try {
+      const rows = await this.scanOrders({ depth: 'full', expectedCount: await readFilterPillCount(this.page, 'ร้านค้า', storeName) });
+      await logger.info(`wave-engine: store "${storeName}" holds ${rows.length} order(s) — excluded from all actions`);
+      return new Set(rows.map((row) => row.orderId));
+    } finally {
+      await selectFilterPill(this.page, 'ร้านค้า', 'ทั้งหมด').catch(() => undefined);
+    }
+  }
+
+  /** Every warehouse option with BigSeller's own live order count — how the engine knows whether anything sits outside the picking warehouse without scanning rows. */
+  async readWarehouseOptions(): Promise<WarehouseFilterOption[]> {
+    return readWarehouseFilterOptions(this.page);
+  }
+
+  /** Restricts the list to `names` (or 'all'), verified. Throws rather than leave the scope uncertain — see setWarehouseFilter. */
+  async selectWarehouses(names: string[] | 'all'): Promise<void> {
+    await setWarehouseFilter(this.page, names);
+  }
+
+  /**
+   * Scans orders under whatever filters are currently active.
+   *
+   * `depth: 'light'` reads only the first pagination page with a low scroll
+   * cap — for the every-2-3-minutes urgent loop. `depth: 'full'` sets
+   * 300/page and walks every page — for the 10-15 minute main loop.
+   */
+  async scanOrders({
+    depth,
+    warehouseScope = '',
+    expectedCount,
+  }: {
+    depth: 'light' | 'full';
+    warehouseScope?: string;
+    /** BigSeller's own count for the active filter — the scan is checked against it and throws on a real shortfall. */
+    expectedCount?: number;
+  }): Promise<ScannedOrderRow[]> {
+    const rows: ScannedOrderRow[] = [];
+
+    if (depth === 'light') {
+      const raw = await collectRawOrderRows(this.page, { maxRounds: 6 });
+      if (raw.length === 0) {
+        await logger.warn(`wave-engine: light scan found no table.list_items rows on ${this.page.url()} — empty queue or markup changed`);
+      }
+      return raw.map((row) => toScannedOrder(row, warehouseScope));
+    }
+
+    await waitForListSettled(this.page);
+    await setMaxPageSize(this.page);
+
+    // Deduped by order id ACROSS pages, not just within one.
+    //
+    // Staff work this queue at the same time as the bot, so rows leave it
+    // while the bot is paginating and everything behind them shifts back a
+    // page — which means the same order can be read on page 1 and again on
+    // page 2. Confirmed live 2026-09-11: a scan reported 313 rows against a
+    // filter count of 165, and the duplicate entries made the engine confirm
+    // two orders TWICE in one cycle (06:06:55 then 06:08:04 for the same
+    // order). The per-page collector dedupes within a page; only this map
+    // catches it across them.
+    const byOrderId = new Map<string, ScannedOrderRow>();
+    let duplicates = 0;
+
+    for (let pageNumber = 1; pageNumber <= 20; pageNumber++) {
+      const raw = await collectRawOrderRows(this.page);
+      if (raw.length === 0) {
+        if (pageNumber === 1) {
+          await logger.warn(`wave-engine: full scan found no table.list_items rows on ${this.page.url()} — empty queue or markup changed`);
+        }
+        break;
+      }
+      for (const row of raw) {
+        const scanned = toScannedOrder(row, warehouseScope);
+        if (byOrderId.has(scanned.orderId)) {
+          duplicates++;
+          continue;
+        }
+        byOrderId.set(scanned.orderId, scanned);
+      }
+      await logger.info(
+        `wave-engine: full scan page ${pageNumber} yielded ${raw.length} row(s) (unique so far ${byOrderId.size})`,
+      );
+      if (!(await goToNextOrderPage(this.page))) {
+        await logger.info(`wave-engine: full scan stopped after page ${pageNumber} — no next page`);
+        break;
+      }
+    }
+
+    if (duplicates > 0) {
+      await logger.info(
+        `wave-engine: dropped ${duplicates} duplicate row(s) seen on more than one page — the queue shifted while paginating`,
+      );
+    }
+
+    rows.push(...byOrderId.values());
+    assertScanIsComplete(rows.length, expectedCount);
+    return rows;
+  }
+
+  /** Raw rows exactly as read, for `--dump`: the only honest way to confirm the shipping-cell layout before relying on it. */
+  async dumpRawRows(limit: number): Promise<RawOrderRow[]> {
+    const raw = await collectRawOrderRows(this.page, { maxRounds: 6 });
+    return raw.slice(0, limit);
+  }
+
+  private orderTable(orderId: string): Locator {
+    if (!SAFE_ORDER_ID.test(orderId)) {
+      throw new Error(`Refusing to build a selector from an unexpected order id: ${JSON.stringify(orderId)}`);
+    }
+    // filter({ has: ... }) rather than .first()/.nth(i) — spec §6: positional
+    // locators break silently when the DOM order shifts, which on a queue that
+    // gains orders continuously would mean confirming the wrong order.
+    return this.page
+      .locator('table.list_items')
+      .filter({ has: this.page.locator(`tr[data-orderid="${orderId}"]`) });
+  }
+
+  /**
+   * The row's confirm control, confirmed live 2026-09-10 via a raw dump of the
+   * ดำเนินการ cell:
+   *
+   *   <a href="javascript:" autoid="orders_15525908136_pack_order"
+   *      title="ยืนยัน" class="action_btn new_action_btn"><span
+   *      class="icon-item bsicon_package"></span></a>
+   *
+   * `autoid` is BigSeller's OWN automation id and it embeds the order id — the
+   * `getByTestId`-equivalent spec §6 asks for first, and the only locator here
+   * that is both per-order and language-independent. Preferred over the title,
+   * which is Thai-only and would break under a locale switch.
+   *
+   * Precision is safety-critical in this cell, not just robustness: the same
+   * row carries `title="ยกเลิกคำสั่งซื้อ"` (cancel the order) and
+   * `title="คำสั่งซื้อเป็นโมฆะ"` (void it) as siblings with the IDENTICAL
+   * `action_btn new_action_btn` class and, like confirm, no text at all. A
+   * positional locator (`.first()`, `.nth(i)`) among those would eventually
+   * cancel a real customer's order instead of confirming it. Never select these
+   * by position.
+   *
+   * Also note "ยืนยัน" exists as a PAGE-level button too (the filter bar's
+   * own), so this stays scoped to the order's table.
+   */
+  private confirmControl(orderId: string): Locator {
+    const row = this.orderTable(orderId);
+    return row
+      .locator(`a[autoid="orders_${orderId}_pack_order"]`)
+      .or(row.locator('.item_action a[title="ยืนยัน"]'));
+  }
+
+  /** Live re-read of one order straight from the current DOM — the immediately-before-confirm check that keeps a poll cycle from double-confirming something a human just handled. */
+  /**
+   * Reloads the list and puts back the context the scan ran under.
+   *
+   * A bare reload is not enough: it drops the คลังสินค้า filter and the
+   * 300/page size, so the list comes back as an unfiltered first page in a
+   * different order. Confirmed live 2026-09-11 — the same order was picked for
+   * confirmation twice, three minutes apart, and both times `readOrderState`
+   * reported "no longer confirmable" while the very next scan still found it
+   * sitting in the queue. Nobody had confirmed it; the bot was simply looking
+   * at a different list.
+   */
+  async refreshKeepingScope(warehouse: string): Promise<void> {
+    await this.refresh();
+    await this.selectWarehouses([warehouse]);
+    await setMaxPageSize(this.page);
+  }
+
+  /**
+   * Scrolls until this order's row exists in the DOM.
+   *
+   * This page lazy-renders only the rows near the current scroll position
+   * (~15 at a time), so "not in the DOM" means "not scrolled to", NOT "gone
+   * from the queue" — and treating the two as the same is what made the
+   * engine skip a perfectly confirmable order. Returns false only after
+   * actually walking the page to the bottom.
+   */
+  async scrollToOrder(orderId: string): Promise<boolean> {
+    if ((await this.orderTable(orderId).count()) > 0) return true;
+
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    await this.page.waitForTimeout(300);
+    for (let round = 0; round < 60; round++) {
+      if ((await this.orderTable(orderId).count()) > 0) return true;
+      const atBottom = await this.page.evaluate(() => {
+        const before = window.scrollY;
+        window.scrollBy(0, window.innerHeight * 2);
+        return window.scrollY === before;
+      });
+      await this.page.waitForTimeout(350);
+      if (atBottom) break;
+    }
+    return (await this.orderTable(orderId).count()) > 0;
+  }
+
+  /** Reads the row as-is, without hunting for it — used while polling right after a click, where the row is already on screen. */
+  private async readOrderStateWithoutScrolling(orderId: string): Promise<OrderState> {
+    const table = this.orderTable(orderId);
+    if ((await table.count()) === 0) return { present: false, statusText: '', hasConfirmControl: false };
+    const cells = await table.locator('td').allInnerTexts();
+    return {
+      present: true,
+      statusText: (cells[ORDER_COLUMN.status] ?? '').replace(/\s+/g, ' ').trim(),
+      hasConfirmControl: (await this.confirmControl(orderId).count()) > 0,
+    };
+  }
+
+  async readOrderState(orderId: string): Promise<OrderState> {
+    const table = this.orderTable(orderId);
+    const present = (await this.scrollToOrder(orderId)) && (await table.count()) > 0;
+    if (!present) return { present: false, statusText: '', hasConfirmControl: false };
+
+    const cells = await table.locator('td').allInnerTexts();
+    const statusText = (cells[ORDER_COLUMN.status] ?? '').replace(/\s+/g, ' ').trim();
+    const hasConfirmControl = (await this.confirmControl(orderId).count()) > 0;
+    return { present, statusText, hasConfirmControl };
+  }
+
+  /**
+   * Clicks this order's confirm control, then waits for the row to leave the
+   * `status=new` list as positive evidence it took effect.
+   *
+   * Only ever reached in live mode for tier 1 in phase 1. Reports
+   * `confirmed: false` with a note when the click landed but the outcome could
+   * not be verified — an unverified click must not be logged as a success,
+   * since the audit log is what the phase-1 sign-off is spot-checked against.
+   */
+  async confirmOrder(orderId: string): Promise<ConfirmResult> {
+    const control = this.confirmControl(orderId);
+    if ((await control.count()) === 0) {
+      return { confirmed: false, note: 'no ยืนยัน/Confirm control found in this row' };
+    }
+
+    await dismissOrderPageOverlays(this.page);
+    await humanDelay(600, 1600); // human-like pacing between real clicks (spec §7)
+    await clickThroughGuide(this.page, control.first(), { timeout: 5000 });
+
+    const modalNote = await this.acknowledgeConfirmModalIfPresent();
+
+    // Accept THREE kinds of evidence, over a window long enough for a platform
+    // that queues confirmations.
+    //
+    // Waiting only for the row to detach, and only for 8 seconds, reported
+    // three real confirmations as UNVERIFIED on 2026-09-11 — the clicks had
+    // landed (the queue counts dropped) but BigSeller had not finished
+    // removing the rows. A wrong "unverified" in the audit log is not
+    // harmless: it invites someone to confirm the order a second time by hand.
+    const deadline = Date.now() + CONFIRM_VERIFY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if ((await this.orderTable(orderId).count()) === 0) {
+        return { confirmed: true, note: `row left the status=new list${modalNote}` };
+      }
+      const state = await this.readOrderStateWithoutScrolling(orderId);
+      if (!state.hasConfirmControl) {
+        return { confirmed: true, note: `row still listed but its confirm control is gone${modalNote}` };
+      }
+      if (state.statusText !== '' && !state.statusText.includes('ใหม่')) {
+        return { confirmed: true, note: `row status changed to "${state.statusText}"${modalNote}` };
+      }
+      await this.page.waitForTimeout(1500);
+    }
+    return {
+      confirmed: false,
+      note:
+        `clicked confirm but after ${CONFIRM_VERIFY_TIMEOUT_MS / 1000}s the row is still listed, still has its ` +
+        `confirm control, and still reads as new${modalNote} — needs manual verification`,
+    };
+  }
+
+  /**
+   * Some BigSeller actions open a second confirmation modal. Whether the
+   * confirm action does has NOT been confirmed live, so this only ever clicks a
+   * button inside a visible `.ant-modal` whose label is an explicit
+   * confirm/ok, logs the modal's own text, and does nothing at all when no
+   * modal appeared.
+   */
+  private async acknowledgeConfirmModalIfPresent(): Promise<string> {
+    const modal = this.page.locator('.ant-modal-wrap:visible').first();
+    if (!(await modal.isVisible({ timeout: 2000 }).catch(() => false))) return '';
+
+    const modalText = ((await modal.innerText().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    const okButton = modal.getByRole('button', { name: /^(ยืนยัน|ตกลง|Confirm|OK)$/i });
+    if ((await okButton.count()) === 0) {
+      await logger.warn(`wave-engine: confirm opened a modal with no recognised confirm button: "${modalText}"`);
+      return ` (unhandled modal: "${modalText}")`;
+    }
+    await okButton.first().click({ timeout: 5000 });
+    await logger.info(`wave-engine: acknowledged confirm modal: "${modalText}"`);
+    return ` (acknowledged modal: "${modalText}")`;
+  }
+}
+
+const DELIVERY_DATE_LABEL = 'กำหนดส่ง';
+
+/**
+ * `warehouse` is stamped from the คลังสินค้า filter the scan was run under —
+ * NOT read from the row.
+ *
+ * An earlier version matched /STOCK[_-]?\d+/ against the row text and was
+ * plainly wrong, caught 2026-09-10 against real rows: the only STOCK-shaped
+ * text in a row lives in the ผู้รับ cell and belongs to the CUSTOMER, e.g. the
+ * JIB order reading "บริษัท เจ.ไอ.บี.คอมพิวเตอร์ กรุ๊ป จำกัด (สำนักงานใหญ่)
+ * (STOCK-3 คลังออนไลน์)" — that is JIB's own branch warehouse, nothing to do
+ * with which of OUR warehouses holds the stock. Feeding that into the
+ * STOCK_5-only guardrail would have flagged orders for a stock move based on
+ * the buyer's address. Unknown ('') until a filtered scan supplies it.
+ */
+/**
+ * Fails a scan that returned materially fewer rows than the filter itself says
+ * exist.
+ *
+ * A partial scan is the most dangerous failure this engine has: it looks like a
+ * successful cycle, but every order it never saw is an order that silently does
+ * not get confirmed — including urgent ones. Confirmed live 2026-09-11: a scan
+ * returned 81 rows while the คลังสินค้า filter reported 1,619, and the only
+ * symptom was a smaller-than-usual summary line.
+ *
+ * The tolerance is deliberately wide. This queue is worked by people at the
+ * same time as the bot: orders arrive AND get confirmed by hand while a scan
+ * is running, so the count and the row total are never going to match. Two
+ * cycles were aborted on 2026-09-11 over gaps of 8% (146/160, 152/165) that
+ * were nothing but staff doing their job. What this guard exists to catch is
+ * structural — a scan that silently returns one page of many (81 rows against
+ * 1,619) — and that survives any sane tolerance.
+ */
+export function assertScanIsComplete(scanned: number, expected: number | undefined): void {
+  if (expected === undefined) return;
+  const tolerance = Math.max(25, Math.ceil(expected * 0.25));
+  if (scanned >= expected - tolerance) return;
+  throw new Error(
+    `Scan is incomplete: collected ${scanned} row(s) but the active filter reports ${expected}. ` +
+      'Refusing to act on a partial view of the queue — orders that were never scanned would silently go unconfirmed.',
+  );
+}
+
+export function toScannedOrder(row: RawOrderRow, warehouseScope = ''): ScannedOrderRow {
+  const shipping = row.cells[ORDER_COLUMN.shipping] ?? '';
+  const urgentKeyword = URGENT_TEXT_SIGNALS.find((signal) => row.rowText.includes(signal));
+  const urgentSignal = row.hasUrgentClass ? 'class*=urgent' : (urgentKeyword ?? '');
+
+  return {
+    orderId: row.orderId,
+    orderNo: (row.cells[ORDER_COLUMN.orderNo] ?? '').replace(/คัดลอก/g, '').trim(),
+    rawShippingCell: shipping,
+    rawRowText: row.rowText,
+    statusText: (row.cells[ORDER_COLUMN.status] ?? '').trim(),
+    urgentFlag: urgentSignal !== '',
+    urgentSignal,
+    deliveryDateRaw: extractDeliveryDateText(shipping),
+    warehouse: warehouseScope,
+  };
+}
+
+/**
+ * Grabs the text right after the "กำหนดส่ง" label so {@link parseDeliveryDate}
+ * can try to read a date out of it. Deliberately returns a slice of raw text
+ * rather than a parsed value: the field's real format is unconfirmed, and a
+ * wrong parse on a Seller Delivery order is exactly the mistake spec §7
+ * forbids, so the unparsed text travels all the way into the log.
+ */
+export function extractDeliveryDateText(shippingCell: string): string | null {
+  const index = shippingCell.indexOf(DELIVERY_DATE_LABEL);
+  if (index === -1) return null;
+  const after = shippingCell.slice(index + DELIVERY_DATE_LABEL.length, index + DELIVERY_DATE_LABEL.length + 40);
+  return after.replace(/^[\s:：]+/, '').trim() || null;
+}

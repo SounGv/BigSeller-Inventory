@@ -32,9 +32,15 @@ export function assertStorageStateExists(): void {
  * DIFFERENT domain than bigseller.com, so none of our saved cookies apply there,
  * which looks exactly like an expired session even though the real .com session
  * was still fine. Dismissing it with "No Prompt" keeps us on .com.
+ *
+ * The button's label follows the browser's `locale` context option, not a fixed
+ * language: with `locale: 'th-TH'` (set in browser-runner.ts to fix a separate
+ * fingerprint-mismatch bug) BigSeller renders this button as "ไม่เตือน" instead of
+ * "No Prompt". Match both so this doesn't silently break again if the locale or
+ * BigSeller's i18n strings change.
  */
 export async function dismissRegionRedirectPrompt(page: Page): Promise<void> {
-  const noPromptButton = page.getByRole('button', { name: 'No Prompt' });
+  const noPromptButton = page.getByRole('button', { name: /^(No Prompt|ไม่เตือน)$/ });
   if (await noPromptButton.isVisible({ timeout: 3000 }).catch(() => false)) {
     await noPromptButton.click();
     await logger.info('Dismissed the bigseller.pro region-redirect prompt');
@@ -53,12 +59,16 @@ export async function dismissRegionRedirectPrompt(page: Page): Promise<void> {
  * Call this once per BrowserContext (covers every page/navigation in it), before
  * any navigation happens — including the one in login-bigseller.ts, since the
  * prompt can interfere with a human's manual login too.
+ *
+ * Same locale caveat as {@link dismissRegionRedirectPrompt}: with `locale: 'th-TH'`
+ * the button text is "ไม่เตือน", not "No Prompt" — match both labels here too.
  */
 export async function installRegionRedirectAutoDismiss(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
+    const DISMISS_LABELS = ['No Prompt', 'ไม่เตือน']; // English + Thai (locale: th-TH)
     const clickNoPromptIfPresent = (): boolean => {
-      const button = Array.from(document.querySelectorAll('button')).find(
-        (el) => el.textContent?.trim() === 'No Prompt',
+      const button = Array.from(document.querySelectorAll('button')).find((el) =>
+        DISMISS_LABELS.includes(el.textContent?.trim() ?? ''),
       );
       if (button) {
         (button as HTMLButtonElement).click();
@@ -71,6 +81,33 @@ export async function installRegionRedirectAutoDismiss(context: BrowserContext):
       if (clickNoPromptIfPresent()) observer.disconnect();
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
+  });
+}
+
+/**
+ * Hides BigSeller's language-switcher onboarding tour outright, instead of
+ * dismissing it by clicking.
+ *
+ * The account is already set to Thai, so this tour has nothing to offer and
+ * reappears on run after run (reported 2026-09-11 with a screenshot showing it
+ * open yet again, language submenu and all). Clicking it was never free: the
+ * mask sits ON TOP of the real language dropdown, so the dismiss click reveals
+ * that menu, and dismiss-language-guide.ts records a previous version of this
+ * code landing a stray click inside it and switching the whole account's UI to
+ * English — which would silently break every Thai selector in this repo.
+ *
+ * `display: none` also removes the mask's pointer interception, which is the
+ * only reason the click-to-dismiss existed. Matched on a class PREFIX so a
+ * renamed variant (`..._tip`, `..._menu`) is covered too.
+ *
+ * dismissLanguageSwitchGuideIfPresent stays in place as a fallback and simply
+ * finds nothing to do: a display:none element is never `isVisible()`.
+ */
+export async function installLanguageGuideSuppressor(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const style = document.createElement('style');
+    style.textContent = '[class*="language_switch_guide"]{display:none !important;}';
+    document.documentElement.appendChild(style);
   });
 }
 

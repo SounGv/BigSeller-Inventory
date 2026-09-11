@@ -1,0 +1,359 @@
+import 'dotenv/config';
+import type { Page } from '@playwright/test';
+import { assertStorageStateExists, checkIsLoggedIn, ensureSessionValid, getStorageStatePath } from '../src/bigseller/auth.js';
+import { BigSellerGenerateWavePage, GENERATE_WAVE_URL } from '../src/bigseller/generate-wave-page.js';
+import { NEW_ORDERS_URL, readFilterPills } from '../src/bigseller/new-orders-dom.js';
+import { BigSellerOrderPriorityPage } from '../src/bigseller/order-priority-page.js';
+import { launchBigSellerBrowser } from '../src/utils/browser-runner.js';
+import { logger } from '../src/utils/logger.js';
+import { loadWaveEngineConfig, SELLER_DELIVERY_CHANNEL } from '../src/wave-engine/config.js';
+import { PLATFORM_CUTOFF } from '../src/wave-engine/channel-policy.js';
+import { DecisionLog } from '../src/wave-engine/decision-log.js';
+import { startScheduler } from '../src/wave-engine/scheduler.js';
+import { runCycle, runFastCycle, toDomainOrder } from '../src/wave-engine/wave-engine-service.js';
+import { bangkokHhMm, classifyOrder, resolveLogisticsChannel } from '../src/wave-engine/tiers.js';
+
+/**
+ * BigSeller-WaveEngine phase 1 (see BigSeller-WaveEngine/TASK-BigSeller-WaveEngine-phase1.md).
+ *
+ * Modes:
+ *   npm run wave-engine              — daemon: urgent + main loops until Ctrl+C
+ *   npm run wave-engine -- --once    — one main-loop cycle, then exit
+ *   npm run wave-engine -- --dump    — print raw order rows and their parsed
+ *                                      fields, then exit (no decisions, no clicks)
+ *
+ * Holds ONE browser context for its whole life, launched through
+ * `launchBigSellerBrowser` — the same fingerprint/locale/stealth setup every
+ * other script here uses, which is what the session fix depends on. It does
+ * NOT re-save storageState: `npm run keep-alive` (scripts/session-keeper.ts)
+ * owns that file, and two processes writing the same session snapshot is a
+ * corruption risk. Run keep-alive alongside this.
+ *
+ * Never re-logs in. A dead session stops the daemon and asks for a human, same
+ * policy as every other job in this repo.
+ */
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  const once = args.includes('--once');
+  const dump = args.includes('--dump');
+  const waveDryRun = args.includes('--wave-dry-run');
+  const board = args.includes('--board');
+  const fast = args.includes('--fast');
+  const dumpLimit = Number(args.find((arg) => /^\d+$/.test(arg)) ?? 5);
+
+  const config = loadWaveEngineConfig();
+  assertStorageStateExists();
+
+  await logger.info(
+    `wave-engine: starting (mode=${dump ? 'dump' : once ? 'once' : 'daemon'}) ` +
+      `live_priorities=${[...config.livePriorities].join(',') || 'none (full dry run)'} urgent=${config.urgentLoopMinutes}min main=${config.mainLoopMinutes}min ` +
+      `jitter=±${config.jitterSeconds}s channels=${Object.keys(config.channelPolicies).length} ` +
+      `eod=${config.endOfDaySweepTime ?? 'unset'}`,
+  );
+  if (config.livePriorities.size > 0) {
+    await logger.warn(
+      `wave-engine: WAVE_ENGINE_LIVE_PRIORITIES=${[...config.livePriorities].join(',')} — orders in ` +
+        'those priorities WILL be confirmed and waved for real. Every other priority stays dry-run.',
+    );
+  } else {
+    await logger.info('wave-engine: full dry run — every decision is logged, nothing is clicked');
+  }
+
+  const headless = (process.env.BIGSELLER_HEADLESS ?? 'false').toLowerCase() === 'true';
+  // Runs unattended for hours, so Chrome's own permission bubble ("wants to
+  // access other apps and services on this device") would just sit there every
+  // launch with nobody to click it away. The engine never prints, so denying
+  // costs it nothing — other jobs in this repo keep the default.
+  const { browser, context } = await launchBigSellerBrowser({
+    headless,
+    storageState: getStorageStatePath(),
+    denyPermissionPrompts: true,
+  });
+  const page = await context.newPage();
+
+  try {
+    if (board) {
+      await printPriorityBoard(page, config);
+      return;
+    }
+
+    if (waveDryRun) {
+      await inspectWavePage(page, config);
+      return;
+    }
+
+    await ensureSessionValid(page, NEW_ORDERS_URL);
+    const priorityPage = new BigSellerOrderPriorityPage(page);
+    await priorityPage.goto();
+
+    if (dump) {
+      await dumpRawRows(priorityPage, config, dumpLimit);
+      return;
+    }
+
+    const decisionLog = new DecisionLog();
+
+    if (fast) {
+      await runFastCycle(page, config, decisionLog);
+      return;
+    }
+
+    if (once) {
+      await runCycle(page, 'main', config, decisionLog);
+      return;
+    }
+
+    await runDaemon(page, config, decisionLog);
+  } finally {
+    await context.close().catch(() => undefined);
+    await browser.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Prints raw rows next to what the scanner made of them — the honest way to
+ * close spec §8's first open question (where กำหนดส่ง actually lives) and to
+ * confirm the urgent-flag and warehouse-code signals, before any tier is
+ * trusted to act on them.
+ */
+/**
+ * `--wave-dry-run`: reads the สร้าง Wave page and reports what is waveable
+ * right now. Strictly read-only — it does not touch a filter, and above all it
+ * never clicks "สร้าง", which would put a real picking task in front of
+ * warehouse staff.
+ *
+ * This is the dry run for step 2 of the flow (order confirmation being step 1),
+ * and the only way to check the โลจิสติกส์ tree without creating anything. The
+ * tree lists only couriers that currently have waveable orders, so its contents
+ * change with the queue.
+ */
+/**
+ * `--board`: what is waiting right now, in priority order, read straight from
+ * the filter counts BigSeller already prints.
+ *
+ * Two seconds instead of the ~2 minutes a row scan takes, because the page has
+ * done the counting itself. It answers the only question that matters at the
+ * start of a round — which courier to confirm first — and it touches nothing.
+ */
+/** Which truck a platform's parcels leave on. Platform names come from the filter row itself. */
+function platformCutoffOf(platformLabel: string): string | undefined {
+  const label = platformLabel.toLowerCase();
+  if (label.includes('shopee')) return PLATFORM_CUTOFF.shopee;
+  if (label.includes('lazada')) return PLATFORM_CUTOFF.lazada;
+  if (label.includes('tiktok')) return PLATFORM_CUTOFF.tiktok;
+  return undefined;
+}
+
+async function printPriorityBoard(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
+  await ensureSessionValid(page, NEW_ORDERS_URL);
+  const priorityPage = new BigSellerOrderPriorityPage(page);
+  await priorityPage.goto();
+
+  const [logistics, stores, platforms, warehouses] = await Promise.all([
+    readFilterPills(page, 'โลจิสติกส์'),
+    readFilterPills(page, 'ร้านค้า'),
+    readFilterPills(page, 'แพลตฟอร์ม'),
+    priorityPage.readWarehouseOptions(),
+  ]);
+
+  // Reservations are not work and must not pad any number on this board
+  // ("LockStock อย่านับ เขาจองของไม่เกี่ยว", 2026-09-11). They are Seller
+  // Delivery orders, so that is the only courier line they inflate — and with
+  // 60 of them sitting there, leaving them in made a line of pure noise look
+  // like the biggest job on the board.
+  const nowHhMm = bangkokHhMm(new Date());
+  const reserved = stores.find((store) => store.label === config.reservedStore)?.count ?? 0;
+  const realCount = (pill: { label: string; count: number | undefined }) =>
+    pill.label.includes(SELLER_DELIVERY_CHANNEL) ? Math.max(0, (pill.count ?? 0) - reserved) : (pill.count ?? 0);
+
+  const waiting = logistics.filter((pill) => realCount(pill) > 0);
+  const ranked = waiting
+    .map((pill) => ({ pill, priority: config.channelPolicies[resolveLogisticsChannel(pill.label, config)]?.priority }))
+    .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99) || realCount(b.pill) - realCount(a.pill));
+
+  const lines = [
+    '',
+    '=== คิวคำสั่งซื้อใหม่ ตามลำดับความสำคัญ ===',
+    ...ranked.map(({ pill, priority }) => {
+      // Seller Delivery is known but has no fixed priority: it is routed by
+      // its กำหนดส่ง date, and most of what sits under it is the reserved
+      // store. Calling it "unknown" like a genuinely unmapped courier would
+      // send someone hunting for a problem that isn't there.
+      const isSellerDelivery = pill.label.includes(SELLER_DELIVERY_CHANNEL);
+      const rank = priority === undefined ? (isSellerDelivery ? ' -' : ' ?') : ` ${priority}`;
+      const flag =
+        priority === undefined
+          ? isSellerDelivery
+            ? '  << ตามวันกำหนดส่ง'
+            : '  << ไม่รู้จัก ต้องดูเอง'
+          : priority <= 2
+            ? '  << ทำก่อน'
+            : '';
+      return `  ลำดับ${rank}  ${String(realCount(pill)).padStart(4)} ใบ   ${pill.label}${flag}`;
+    }),
+    ...(ranked.length === 0 ? ['  (ไม่มีงานค้าง)'] : []),
+    '',
+    '=== ที่ไม่ต้องทำ / ต้องระวัง ===',
+    `  ของจอง ${config.reservedStore}: ${reserved} ใบ — ไม่นับเป็นงาน หักออกจากทุกตัวเลขข้างบนแล้ว`,
+    ...warehouses
+      .filter((option) => option.name !== config.pickingWarehouse && option.count > 0)
+      .map((option) => `  อยู่คลัง ${option.name}: ${option.count} ใบ << ต้องย้ายของมา ${config.pickingWarehouse} ก่อน`),
+    `  งานจริงใน ${config.pickingWarehouse}: ${Math.max(0, (warehouses.find((o) => o.name === config.pickingWarehouse)?.count ?? 0) - reserved)} ใบ (หักของจองแล้ว)`,
+    '',
+    `=== แพลตฟอร์ม / เวลารถ (ตอนนี้ ${nowHhMm}) ===`,
+    ...platforms
+      .filter((pill) => (pill.count ?? 0) > 0)
+      .map((pill) => {
+        const cutoff = platformCutoffOf(pill.label);
+        if (!cutoff) return `  ${String(pill.count).padStart(4)} ใบ   ${pill.label}   (ไม่มีเวลารถ)`;
+        return (
+          `  ${String(pill.count).padStart(4)} ใบ   ${pill.label}   รถ ${cutoff}   ` +
+          `${nowHhMm >= cutoff ? '<< ถึงเวลาแล้ว' : 'ยังไม่ถึง'}`
+        );
+      }),
+    '',
+  ];
+  console.log(lines.join('\n'));
+}
+
+async function inspectWavePage(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
+  const wavePage = new BigSellerGenerateWavePage(page);
+  await ensureSessionValid(page, GENERATE_WAVE_URL);
+  await wavePage.goto();
+
+  const before = await wavePage.readSummary();
+  await logger.info(`wave-engine [wave-dry-run]: totals before ticking ประเภทพัสดุ — parcels=${before.parcels}`);
+
+  // Ticking parcel types is a filter change, not a write: no wave is created
+  // and nothing is submitted. It is also the suspected difference between
+  // reading a real count and reading 0, which is what stopped both live runs
+  // on 2026-09-11 after they had already confirmed an order.
+  await wavePage.selectAllPackageTypes();
+  const summary = await wavePage.readSummary();
+  await logger.info(
+    `wave-engine [wave-dry-run]: page totals — parcels=${summary.parcels} skuTypes=${summary.skuTypes} items=${summary.items}`,
+  );
+
+  const tree = await wavePage.readLogisticsTree();
+  if (tree.length === 0) {
+    await logger.warn('wave-engine [wave-dry-run]: the โลจิสติกส์ tree is empty — nothing is waveable right now');
+    return;
+  }
+  for (const node of tree) {
+    await logger.info(
+      `wave-engine [wave-dry-run]: ${node.isGroup ? 'GROUP' : '  leaf'} ` +
+        `${node.group ? `${node.group} / ` : ''}${node.title}${node.checked ? ' [checked]' : ''}`,
+    );
+  }
+
+  // How big would each carrier's wave be? Per CARRIER, not per group, because
+  // that is the unit a wave is now created in (one carrier per wave, never
+  // combined). A wave also sweeps up every waveable parcel for that carrier —
+  // including ones staff confirmed by hand — so the number is worth seeing
+  // before anyone authorises a live run. Selecting a scope is a filter change;
+  // no wave is created here.
+  const forBot: string[] = [];
+  const forHumans: string[] = [];
+  for (const carrier of tree.filter((node) => !node.isGroup)) {
+    await wavePage.setLogisticsScope([{ title: carrier.title, group: carrier.group }]);
+    const scoped = await wavePage.readSummary();
+    if (scoped.parcels === 0) continue;
+    const line = `${String(scoped.parcels).padStart(4)} พัสดุ / ${scoped.items} ชิ้น   ${carrier.title}`;
+    (scoped.parcels >= config.minParcelsMultiType ? forBot : forHumans).push(line);
+  }
+  await wavePage.setLogisticsScope([{ title: tree[0].title }]);
+
+  // Split into what the bot will wave and what it deliberately leaves alone.
+  // Below the threshold a wave is one trip up a floor for a couple of parcels,
+  // so those stay for a person ("บางรอบเหลือ 1-2 ใบ — เก็บไว้ให้คนทำ") — and
+  // that handover only works if it is visible without reading a log file.
+  console.log(
+    [
+      '',
+      `=== พร้อมทำ wave (ถึง ${config.minParcelsMultiType} พัสดุแล้ว) ===`,
+      ...(forBot.length > 0 ? forBot.map((line) => `  ${line}`) : ['  (ไม่มี)']),
+      '',
+      '=== เก็บไว้ให้คนทำ (น้อยเกินกว่าจะขึ้นชั้นไปหยิบ) ===',
+      ...(forHumans.length > 0 ? forHumans.map((line) => `  ${line}`) : ['  (ไม่มี)']),
+      '',
+    ].join('\n'),
+  );
+}
+
+async function dumpRawRows(priorityPage: BigSellerOrderPriorityPage, config: ReturnType<typeof loadWaveEngineConfig>, limit: number): Promise<void> {
+  const rows = await priorityPage.dumpRawRows(limit);
+  const scannedById = new Map((await priorityPage.scanOrders({ depth: 'light' })).map((row) => [row.orderId, row]));
+  const now = new Date();
+  console.log(`\n--- ${rows.length} raw order row(s) from ${NEW_ORDERS_URL} ---\n`);
+  for (const row of rows) {
+    const scanned = scannedById.get(row.orderId);
+    console.log(`orderId=${row.orderId}`);
+    console.log(`  cells:`);
+    row.cells.forEach((cell, index) => console.log(`    [${index}] ${cell}`));
+    console.log(`  hasUrgentClass=${row.hasUrgentClass}`);
+    if (scanned) {
+      const order = toDomainOrder(scanned, config);
+      const decision = classifyOrder(order, config, { now, channelPendingCounts: {} });
+      console.log(`  parsed: channel="${order.logisticsChannel}" urgent=${scanned.urgentFlag}(${scanned.urgentSignal}) ` +
+        `deliveryRaw="${scanned.deliveryDateRaw ?? ''}" deliveryDate=${order.deliveryDate ?? 'null'} warehouse="${order.warehouse}"`);
+      console.log(`  decision: tier=${String(decision.tier)} action=${decision.action}`);
+      console.log(`  reason: ${decision.reason}`);
+    }
+    console.log('');
+  }
+  console.log('Check every "parsed" line against the cells above before trusting any live tier.\n');
+}
+
+async function runDaemon(
+  page: Page,
+  config: ReturnType<typeof loadWaveEngineConfig>,
+  decisionLog: DecisionLog,
+): Promise<void> {
+  let stopping = false;
+  let resolveExit: () => void = () => undefined;
+  const exited = new Promise<void>((resolve) => {
+    resolveExit = resolve;
+  });
+
+  const guardedCycle = (loop: 'urgent' | 'main') => async () => {
+    if (stopping) return;
+    if (!(await checkIsLoggedIn(page))) {
+      await logger.error(
+        'wave-engine: session expired — stopping. A human must run "npm run login:bigseller" (and keep "npm run keep-alive" running), then restart this.',
+      );
+      stop();
+      return;
+    }
+    // The urgent loop uses the fast path. Its whole job is to beat staff to
+    // the hours-SLA orders, and the full scan takes ~2 minutes — long enough
+    // that on 2026-09-11 three consecutive live runs found their target
+    // already handled by a person. The fast path reads the filter counts
+    // instead of every row and finishes in well under a minute.
+    await (loop === 'urgent' ? runFastCycle(page, config, decisionLog) : runCycle(page, 'main', config, decisionLog));
+  };
+
+  const scheduler = startScheduler(config, {
+    runUrgent: guardedCycle('urgent'),
+    runMain: guardedCycle('main'),
+  });
+
+  function stop(): void {
+    if (stopping) return;
+    stopping = true;
+    scheduler.stop();
+    void logger.info('wave-engine: stopped');
+    resolveExit();
+  }
+
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+
+  console.log('wave-engine: running. Press Ctrl+C to stop.');
+  await exited;
+}
+
+main().catch(async (error) => {
+  await logger.error(`wave-engine: fatal: ${(error as Error).message}`);
+  console.error(error);
+  process.exit(1);
+});

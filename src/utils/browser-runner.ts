@@ -1,10 +1,11 @@
 import path from 'node:path';
-import { chromium, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { chromium, type Browser, type BrowserContext, type Page, type Response } from '@playwright/test';
 import {
   assertStorageStateExists,
   getStorageStatePath,
   installRegionRedirectAutoDismiss,
   installAutomationStealth,
+  installLanguageGuideSuppressor,
   ensureSessionValid,
   SessionExpiredError,
 } from '../bigseller/auth.js';
@@ -63,16 +64,129 @@ const CONTEXT_OPTIONS = {
  * closes that gap.
  */
 export async function launchBigSellerBrowser(
-  options: { headless: boolean; storageState?: string },
+  options: { headless: boolean; storageState?: string; denyPermissionPrompts?: boolean },
 ): Promise<{ browser: Browser; context: BrowserContext }> {
-  const browser = await chromium.launch({ headless: options.headless, args: LAUNCH_ARGS });
+  const browser = await chromium.launch({
+    headless: options.headless,
+    // Each run gets a fresh profile, so Chrome re-asks its own permission
+    // prompt ("www.bigseller.com wants to access other apps and services on
+    // this device" — reported 2026-09-11) every single time, with no way to
+    // remember an answer. Opt-in per caller rather than global: auto-denying
+    // everything could also deny whatever BigSeller's local print component
+    // asks for, and this repo does print shipping labels.
+    args: options.denyPermissionPrompts ? [...LAUNCH_ARGS, '--deny-permission-prompts'] : LAUNCH_ARGS,
+  });
   const context = await browser.newContext({
     ...CONTEXT_OPTIONS,
     ...(options.storageState ? { storageState: options.storageState } : {}),
   });
   await installRegionRedirectAutoDismiss(context);
   await installAutomationStealth(context);
+  await installLanguageGuideSuppressor(context);
+  // Only needed when actually launched headless — a headed context never sends
+  // "HeadlessChrome" in the first place, so there's nothing to strip. Confirmed
+  // live (2026-08-27): installing this route interceptor unconditionally broke
+  // `page.waitForLoadState('networkidle')` in the normal (headed) sync/import
+  // browser — `syncLocationAllTypes` timed out 3/3 tries via the LINE
+  // command-bot until this was scoped to headless-only, then passed clean.
+  if (options.headless) {
+    await installHeadlessClientHintsPatch(context);
+  }
+  installNetworkDebugLogger(context);
   return { browser, context };
+}
+
+/**
+ * Strips the "HeadlessChrome" brand Chromium adds to Client Hints headers
+ * (`sec-ch-ua`, `sec-ch-ua-full-version-list`) — and the literal substring in
+ * `User-Agent` on older headless modes — when launched headless.
+ *
+ * Confirmed live (2026-08-27) via `BIGSELLER_DEBUG_NETWORK=true` logging: the
+ * intentionally-always-headless preflight check in {@link hasValidSession}
+ * sends `HeadlessChrome` on the wire on every single request it makes to
+ * bigseller.com — including `isLogin.json` itself — not just to third-party
+ * analytics. Given this project's own earlier finding that "running the sync
+ * browser headless gets flagged by BigSeller's bot detection" (see the doc
+ * comment on this function above), an hourly cron job broadcasting "I am a
+ * headless bot" in a standard header before every single sync run is a strong
+ * root-cause candidate for the recurring ~30min session-kick bug tracked in
+ * HANDOFF-SESSION-BUG.md. A no-op when not running headless (nothing to strip).
+ *
+ * Rewrites only the real outgoing HTTP headers — a server-side check reads
+ * these, not `navigator.userAgentData` — so this does NOT change what
+ * in-page JS like Google Analytics' own `uafvl` beacon reports.
+ */
+async function installHeadlessClientHintsPatch(context: BrowserContext): Promise<void> {
+  await context.route('**/*', async (route) => {
+    const headers = route.request().headers();
+    let changed = false;
+
+    for (const name of ['sec-ch-ua', 'sec-ch-ua-full-version-list']) {
+      const value = headers[name];
+      if (value && /HeadlessChrome/i.test(value)) {
+        headers[name] = value
+          .split(',')
+          .map((brand) => brand.trim())
+          .filter((brand) => !/HeadlessChrome/i.test(brand))
+          .join(', ');
+        changed = true;
+      }
+    }
+
+    const userAgent = headers['user-agent'];
+    if (userAgent && /HeadlessChrome/i.test(userAgent)) {
+      headers['user-agent'] = userAgent.replace(/HeadlessChrome/gi, 'Chrome');
+      changed = true;
+    }
+
+    await (changed ? route.continue({ headers }) : route.continue());
+  });
+}
+
+/**
+ * TEMPORARY diagnostic aid for the session issue tracked in
+ * HANDOFF-SESSION-BUG.md: the saved session appears to go stale roughly every
+ * ~30min (reported live 2026-08-27, evidenced by `logs/scheduled-sync.log`
+ * alternating success/`SessionExpiredError` across the hourly cron) — a
+ * DIFFERENT symptom from the in-run fingerprint-mismatch bug already fixed
+ * above, with no confirmed root cause yet.
+ *
+ * Off by default (only active with `BIGSELLER_DEBUG_NETWORK=true`) — logging
+ * every request on every routine sync run would just be noise. Only logs
+ * document/xhr/fetch requests to bigseller.com/.pro (skips static asset
+ * chatter) plus any response with a non-2xx status, so a real failing run gets
+ * captured with enough detail to see which call flips first. Logs Set-Cookie
+ * cookie NAMES only, never values — cookie values are session credentials and
+ * must never be written to logs/*.log.
+ *
+ * Remove this once the ~30min root cause is found and fixed; it's a probe, not
+ * a permanent feature.
+ */
+function installNetworkDebugLogger(context: BrowserContext): void {
+  if ((process.env.BIGSELLER_DEBUG_NETWORK ?? '').toLowerCase() !== 'true') return;
+
+  context.on('response', (response) => {
+    const url = response.url();
+    if (!/bigseller\.(com|pro)/.test(url)) return;
+
+    const resourceType = response.request().resourceType();
+    const isInteresting = resourceType === 'document' || resourceType === 'xhr' || resourceType === 'fetch';
+    if (!isInteresting && response.status() < 400) return;
+
+    void logDebugResponse(response).catch(() => undefined);
+  });
+}
+
+async function logDebugResponse(response: Response): Promise<void> {
+  const headers = await response.headersArray();
+  const setCookieNames = headers
+    .filter((h) => h.name.toLowerCase() === 'set-cookie')
+    .map((h) => h.value.split('=')[0]?.trim())
+    .filter(Boolean);
+  const cookieNote = setCookieNames.length > 0 ? ` [Set-Cookie: ${setCookieNames.join(', ')}]` : '';
+  await logger.info(
+    `[net-debug] ${response.status()} ${response.request().method()} ${response.url()}${cookieNote}`,
+  );
 }
 
 /**

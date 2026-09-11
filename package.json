@@ -11,6 +11,18 @@
     "sync:all": "tsx scripts/sync-all.ts",
     "validate": "tsx scripts/validate.ts",
     "sync:bigseller": "tsx scripts/sync-bigseller.ts",
+    "sync:order-demand": "tsx scripts/sync-order-demand.ts",
+    "sync:transfer-in-transit": "tsx scripts/sync-transfer-in-transit.ts",
+    "sync:cancelled-after-pack": "tsx scripts/sync-cancelled-after-pack.ts",
+    "sync:warehouse-backlog": "tsx scripts/sync-warehouse-backlog.ts",
+    "sync:operator-wave-ranking": "tsx scripts/sync-operator-wave-ranking.ts",
+    "sync:sales-summary": "tsx scripts/sync-sales-summary.ts",
+    "reconcile:decoy-warehouse": "tsx scripts/reconcile-decoy-warehouse.ts",
+    "sync:order-funnel": "tsx scripts/sync-order-funnel.ts",
+    "sync:best-sellers": "tsx scripts/sync-best-sellers.ts",
+    "sync:warehouse-stock-count": "tsx scripts/sync-warehouse-stock-count.ts",
+    "sync:order-stock-check": "tsx scripts/sync-order-stock-check.ts",
+    "print:com7-wave-labels": "tsx scripts/print-com7-wave-labels.ts",
     "validate:sync": "tsx scripts/validate-sync.ts",
     "plan:moves": "tsx scripts/plan-moves.ts",
     "export:moves": "tsx scripts/export-moves.ts",
@@ -24,10 +36,13 @@
     "line:status": "tsx scripts/line-status.ts",
     "import:carton-qty": "tsx scripts/import-carton-qty.ts",
     "bot:line": "tsx scripts/line-command-bot.ts",
+    "keep-alive": "tsx scripts/session-keeper.ts",
+    "wave-engine": "tsx scripts/wave-engine.ts",
     "test": "playwright test",
-    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts"
+    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts tests/wave-engine-tiers.spec.ts"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.4",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",
     "xlsx": "^0.18.5"
