@@ -7,6 +7,7 @@ import {
   NEW_ORDERS_URL,
   ORDER_COLUMN,
   readFilterPillCount,
+  readFilterPills,
   readWarehouseFilterOptions,
   selectFilterPill,
   waitForListSettled,
@@ -19,6 +20,14 @@ import { humanDelay } from '../utils/human-delay.js';
 import { logger } from '../utils/logger.js';
 
 /** One order's priority-relevant fields, as read off the page (spec §3). Raw text is kept so an unparsed field is diagnosable from the dry-run log instead of guessed at. */
+/**
+ * How strictly a scan is checked against the count the filter publishes.
+ * `'tolerant'` for the live queue, which legitimately shrinks while the bot
+ * paginates; `'exact'` for exclusion lists, where a missing row silently turns
+ * an untouchable order into an eligible one.
+ */
+export type ScanCompleteness = 'tolerant' | 'exact';
+
 export interface ScannedOrderRow {
   orderId: string;
   orderNo: string;
@@ -28,8 +37,12 @@ export interface ScannedOrderRow {
   urgentFlag: boolean;
   /** Which signal produced `urgentFlag` — '' when not flagged. Logged so the real บาร์ด่วนพิเศษ markup can be confirmed on the first live day. */
   urgentSignal: string;
+  /** Raw text of the เวลา cell, before parsing — kept so an unreadable timestamp is diagnosable rather than silently treated as "oldest". */
+  orderTimeRaw: string;
   /** Raw text following "กำหนดส่ง", before date parsing. null when the label isn't present in the row at all. */
   deliveryDateRaw: string | null;
+  /** Raw text of the รายละเอียดสินค้า cell — carries the SKU codes, which is the only way to tell which FLOOR an order picks from. */
+  productCell: string;
   warehouse: string;
 }
 
@@ -103,6 +116,32 @@ export class BigSellerOrderPriorityPage {
     await this.page.goto(NEW_ORDERS_URL, { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(2500);
     await dismissOrderPageOverlays(this.page);
+    await this.resetAllFilters();
+  }
+
+  /**
+   * Puts every filter row back to ทั้งหมด before a cycle reads anything.
+   *
+   * BigSeller REMEMBERS the filters across page loads, so reloading the URL is
+   * not a fresh start. Whatever the last run — or the last person — left
+   * selected is still applied, and a scan taken under it describes a slice of
+   * the queue while reporting itself as the whole thing.
+   *
+   * This is what broke the live run on 2026-09-12: an earlier cycle died
+   * part-way and left a filter on, so the next cycle collected 69 rows against
+   * a filter reporting 508 and had to abandon itself. The completeness check
+   * did its job; the page state going in was the fault.
+   *
+   * Verified, not best-effort — `restoreFilterToAll` reads the selection back
+   * and throws if it did not move. Starting a cycle blind is the failure this
+   * exists to prevent, so a reset that cannot be confirmed stops the cycle.
+   */
+  async resetAllFilters(): Promise<void> {
+    for (const row of ['ร้านค้า', 'แพลตฟอร์ม', 'โลจิสติกส์'] as const) {
+      await restoreFilterToAll(this.page, row);
+    }
+    await setWarehouseFilter(this.page, 'all');
+    await logger.info('wave-engine: filters reset to ทั้งหมด — cycle starts from the whole queue');
   }
 
   /** Reloads the list so a stale DOM can't hide a confirmation someone made by hand since the last scan (idempotency, spec §7). */
@@ -133,12 +172,61 @@ export class BigSellerOrderPriorityPage {
   async collectStoreOrderIds(storeName: string): Promise<Set<string>> {
     await selectFilterPill(this.page, 'ร้านค้า', storeName);
     try {
-      const rows = await this.scanOrders({ depth: 'full', expectedCount: await readFilterPillCount(this.page, 'ร้านค้า', storeName) });
+      const rows = await this.scanOrders({
+        depth: 'full',
+        expectedCount: await readFilterPillCount(this.page, 'ร้านค้า', storeName),
+        completeness: 'exact',
+      });
       await logger.info(`wave-engine: store "${storeName}" holds ${rows.length} order(s) — excluded from all actions`);
       return new Set(rows.map((row) => row.orderId));
     } finally {
-      await selectFilterPill(this.page, 'ร้านค้า', 'ทั้งหมด').catch(() => undefined);
+      // A failed reset leaves the whole page filtered to one store, and every
+      // later read in the cycle then describes that store instead of the
+      // queue. Never swallow it.
+      await restoreFilterToAll(this.page, 'ร้านค้า');
     }
+  }
+
+  /**
+   * Order ids from platforms this engine may not act on.
+   *
+   * Only the platforms with a non-zero count are scanned — the platform row
+   * publishes its own counts, so a day with no manual orders costs nothing.
+   * Same membership trick as the reserved store: a row does not say which
+   * platform it came from.
+   *
+   * Resets the platform filter to ทั้งหมด afterwards.
+   */
+  async collectBlockedPlatformOrderIds(allowedPlatforms: string[]): Promise<Set<string>> {
+    const pills = await readFilterPills(this.page, 'แพลตฟอร์ม');
+    // `pill.count === 0` is the only reason to skip a blocked platform: an
+    // UNREADABLE count (undefined) must still be scanned, or a platform whose
+    // markup changed would silently contribute zero exclusions and every order
+    // behind it would look eligible.
+    const blocked = pills.filter(
+      (pill) =>
+        pill.count !== 0 &&
+        pill.label !== 'ทั้งหมด' &&
+        !allowedPlatforms.some((allowed) => pill.label.toLowerCase().includes(allowed.toLowerCase())),
+    );
+    if (blocked.length === 0) return new Set();
+
+    const ids = new Set<string>();
+    try {
+      for (const pill of blocked) {
+        await selectFilterPill(this.page, 'แพลตฟอร์ม', pill.label);
+        const expectedCount = pill.count ?? (await readFilterPillCount(this.page, 'แพลตฟอร์ม', pill.label));
+        for (const row of await this.scanOrders({ depth: 'full', expectedCount, completeness: 'exact' })) {
+          ids.add(row.orderId);
+        }
+        await logger.warn(
+          `wave-engine: platform "${pill.label}" holds ${pill.count} order(s) — outside ${allowedPlatforms.join('/')}, excluded from all actions`,
+        );
+      }
+    } finally {
+      await restoreFilterToAll(this.page, 'แพลตฟอร์ม');
+    }
+    return ids;
   }
 
   /** Every warehouse option with BigSeller's own live order count — how the engine knows whether anything sits outside the picking warehouse without scanning rows. */
@@ -162,11 +250,14 @@ export class BigSellerOrderPriorityPage {
     depth,
     warehouseScope = '',
     expectedCount,
+    completeness = 'tolerant',
   }: {
     depth: 'light' | 'full';
     warehouseScope?: string;
     /** BigSeller's own count for the active filter — the scan is checked against it and throws on a real shortfall. */
     expectedCount?: number;
+    /** `'exact'` for exclusion lists: no tolerance, and an unreadable count is itself a failure. */
+    completeness?: ScanCompleteness;
   }): Promise<ScannedOrderRow[]> {
     const rows: ScannedOrderRow[] = [];
 
@@ -226,7 +317,7 @@ export class BigSellerOrderPriorityPage {
     }
 
     rows.push(...byOrderId.values());
-    assertScanIsComplete(rows.length, expectedCount);
+    assertScanIsComplete(rows.length, expectedCount, completeness);
     return rows;
   }
 
@@ -410,9 +501,31 @@ export class BigSellerOrderPriorityPage {
     if (!(await modal.isVisible({ timeout: 2000 }).catch(() => false))) return '';
 
     const modalText = ((await modal.innerText().catch(() => '')) ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    // Read it BEFORE agreeing to it. This used to click the OK button of
+    // whatever dialog happened to be on screen, so a warning the bot has no
+    // business accepting — short stock, a negative-stock override, a
+    // confirm-everything prompt — would have been agreed to silently and only
+    // described in the log afterwards.
+    await logger.info(`wave-engine: confirm opened a modal: "${modalText}"`);
+
+    // Questions only a person may answer. Anything about stock is squarely in
+    // this group: STOCK_5 is the only warehouse holding sellable stock, and
+    // the standing rule is that the bot reports a stock problem and never
+    // resolves one itself.
+    const REFUSE_MARKERS = ['ไม่พอ', 'ติดลบ', 'ไม่เพียงพอ', 'สต็อก', 'ยกเลิก', 'ลบ', 'insufficient', 'negative', 'cancel', 'delete'];
+    const refuseMarker = REFUSE_MARKERS.find((marker) => modalText.toLowerCase().includes(marker.toLowerCase()));
+    if (refuseMarker) {
+      await this.page.keyboard.press('Escape').catch(() => undefined);
+      await logger.error(
+        `wave-engine: REFUSED to answer a confirm modal mentioning "${refuseMarker}" — dismissed it instead. ` +
+          `A person has to decide this one: "${modalText}"`,
+      );
+      return ` (refused modal mentioning "${refuseMarker}": "${modalText}")`;
+    }
+
     const okButton = modal.getByRole('button', { name: /^(ยืนยัน|ตกลง|Confirm|OK)$/i });
     if ((await okButton.count()) === 0) {
-      await logger.warn(`wave-engine: confirm opened a modal with no recognised confirm button: "${modalText}"`);
+      await logger.warn(`wave-engine: confirm modal has no recognised confirm button: "${modalText}"`);
       return ` (unhandled modal: "${modalText}")`;
     }
     await okButton.first().click({ timeout: 5000 });
@@ -454,7 +567,50 @@ const DELIVERY_DATE_LABEL = 'กำหนดส่ง';
  * structural — a scan that silently returns one page of many (81 rows against
  * 1,619) — and that survives any sane tolerance.
  */
-export function assertScanIsComplete(scanned: number, expected: number | undefined): void {
+/**
+ * Puts a filter row back on ทั้งหมด and REFUSES to continue if it will not go.
+ *
+ * The old version swallowed the failure. On 2026-09-12 that left the platform
+ * row stuck on คำสั่งซื้อด้วยตนเอง: the run reported an empty morning, and the
+ * staff's own screen was left filtered behind it. A filter that cannot be reset
+ * is not a cosmetic problem — every count taken afterwards is wrong.
+ */
+export async function restoreFilterToAll(page: Page, rowLabel: string): Promise<void> {
+  try {
+    await selectFilterPill(page, rowLabel, 'ทั้งหมด');
+  } catch (error) {
+    const message = `Could not reset the "${rowLabel}" filter to ทั้งหมด — the page is left filtered and every later count would be wrong: ${(error as Error).message}`;
+    await logger.error(`wave-engine: ${message}`);
+    throw new Error(message);
+  }
+}
+
+export function assertScanIsComplete(
+  scanned: number,
+  expected: number | undefined,
+  completeness: ScanCompleteness = 'tolerant',
+): void {
+  // An exclusion list has to be read WHOLE. A missing id there does not mean
+  // "one order goes unconfirmed" — it means an order nobody may touch looks
+  // touchable, which is the failure mode the guard exists to prevent. And the
+  // tolerance below only makes sense for the live queue, which shrinks under
+  // the bot because staff confirm from it; a LockStock or manual-order filter
+  // does not shrink that way, so a shortfall there is a read problem, not
+  // concurrent work.
+  if (completeness === 'exact') {
+    if (expected === undefined) {
+      throw new Error(
+        `Scan is unverifiable: collected ${scanned} row(s) but the active filter published no count. ` +
+          'Refusing to build an exclusion list that cannot be checked — an unread order would look eligible.',
+      );
+    }
+    if (scanned >= expected) return;
+    throw new Error(
+      `Exclusion scan is incomplete: collected ${scanned} row(s) but the active filter reports ${expected}. ` +
+        'Refusing to act — every order missing from this list would be treated as eligible.',
+    );
+  }
+
   if (expected === undefined) return;
   const tolerance = Math.max(25, Math.ceil(expected * 0.25));
   if (scanned >= expected - tolerance) return;
@@ -477,7 +633,9 @@ export function toScannedOrder(row: RawOrderRow, warehouseScope = ''): ScannedOr
     statusText: (row.cells[ORDER_COLUMN.status] ?? '').trim(),
     urgentFlag: urgentSignal !== '',
     urgentSignal,
+    orderTimeRaw: (row.cells[ORDER_COLUMN.time] ?? '').replace(/\s+/g, ' ').trim(),
     deliveryDateRaw: extractDeliveryDateText(shipping),
+    productCell: (row.cells[ORDER_COLUMN.product] ?? '').replace(/\s+/g, ' ').trim(),
     warehouse: warehouseScope,
   };
 }

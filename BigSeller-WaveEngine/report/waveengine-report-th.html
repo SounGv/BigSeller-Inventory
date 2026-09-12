@@ -1,0 +1,686 @@
+<title>รายงานการทำงาน WaveEngine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Noto+Serif+Thai:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground: #eceff1;
+    --surface: #ffffff;
+    --surface-sunk: #e3e8eb;
+    --ink: #142029;
+    --ink-soft: #465966;
+    --ink-faint: #6c7e8a;
+    --rule: #cdd6db;
+    --rule-strong: #aebac2;
+
+    --act: #0f6d5c;
+    --act-bg: #dceee9;
+    --hold: #96570a;
+    --hold-bg: #f6e8d4;
+    --stop: #92302f;
+    --stop-bg: #f6dedd;
+
+    --display: "IBM Plex Sans Thai", "Helvetica Neue", Arial, sans-serif;
+    --body: "Noto Serif Thai", "IBM Plex Sans Thai", Georgia, serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+
+    --measure: 58ch;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f171c;
+      --surface: #161f26;
+      --surface-sunk: #1d272f;
+      --ink: #e4ecf1;
+      --ink-soft: #a3b4bf;
+      --ink-faint: #7e909c;
+      --rule: #2b3841;
+      --rule-strong: #3d4d58;
+
+      --act: #45c2a6;
+      --act-bg: #10332d;
+      --hold: #d79a45;
+      --hold-bg: #33260f;
+      --stop: #e08886;
+      --stop-bg: #371a1a;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0f171c;
+    --surface: #161f26;
+    --surface-sunk: #1d272f;
+    --ink: #e4ecf1;
+    --ink-soft: #a3b4bf;
+    --ink-faint: #7e909c;
+    --rule: #2b3841;
+    --rule-strong: #3d4d58;
+
+    --act: #45c2a6;
+    --act-bg: #10332d;
+    --hold: #d79a45;
+    --hold-bg: #33260f;
+    --stop: #e08886;
+    --stop-bg: #371a1a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.85;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 74rem;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 4vw, 3.5rem) clamp(1rem, 4vw, 2.5rem) 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(2.5rem, 5vw, 4rem);
+  }
+
+  .col { max-width: var(--measure); }
+
+  h1, h2, h3 { font-family: var(--display); }
+
+  .eyebrow {
+    font-family: var(--display);
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--ink-faint);
+  }
+
+  /* ---- หัวรายงาน ---- */
+  .masthead { display: flex; flex-direction: column; gap: 1rem; }
+
+  .masthead h1 {
+    margin: 0;
+    font-size: clamp(2rem, 5vw, 3.1rem);
+    font-weight: 700;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+  }
+
+  .standfirst {
+    margin: 0;
+    max-width: var(--measure);
+    font-size: clamp(1.02rem, 2vw, 1.18rem);
+    color: var(--ink-soft);
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.75rem;
+    margin-top: 0.5rem;
+    padding-top: 1rem;
+    border-top: 2px solid var(--rule-strong);
+    font-family: var(--display);
+    font-size: 0.85rem;
+    color: var(--ink-faint);
+    line-height: 1.6;
+  }
+  .meta b { color: var(--ink); font-weight: 600; }
+  .meta .num { font-family: var(--mono); font-weight: 500; }
+
+  .state {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    align-self: flex-start;
+    padding: 0.55rem 1rem;
+    background: var(--hold-bg);
+    color: var(--hold);
+    border-left: 3px solid currentColor;
+    font-family: var(--display);
+    font-size: 0.92rem;
+    line-height: 1.5;
+  }
+  .state b { font-weight: 600; }
+
+  .scope {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    align-self: flex-start;
+    padding: 0.55rem 1rem;
+    background: var(--act-bg);
+    color: var(--act);
+    border-left: 3px solid currentColor;
+    font-family: var(--display);
+    font-size: 0.92rem;
+    line-height: 1.5;
+  }
+  .scope b { font-weight: 600; }
+  .scope strong { font-weight: 600; }
+
+  /* ---- หัวข้อ ---- */
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+
+  h2 {
+    margin: 0;
+    font-size: clamp(1.35rem, 2.8vw, 1.7rem);
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  h2 .n {
+    font-family: var(--mono);
+    font-size: 0.72em;
+    font-weight: 500;
+    color: var(--ink-faint);
+    margin-right: 0.6rem;
+  }
+
+  p { margin: 0 0 0.85rem; }
+  p:last-child { margin-bottom: 0; }
+  .lede { font-size: 1.05rem; }
+  strong { font-weight: 600; }
+
+  code, .m {
+    font-family: var(--mono);
+    font-size: 0.86em;
+  }
+  code {
+    background: var(--surface-sunk);
+    padding: 0.1em 0.38em;
+    border-radius: 2px;
+  }
+
+  /* ---- รอบการทำงาน ---- */
+  .cycle { display: flex; flex-direction: column; }
+
+  .stage {
+    display: grid;
+    grid-template-columns: 3rem 1fr;
+    gap: 0 1.3rem;
+    padding: 1.1rem 0;
+    border-top: 1px solid var(--rule);
+  }
+  .stage:first-child { border-top: 2px solid var(--rule-strong); }
+  .stage:last-child { border-bottom: 2px solid var(--rule-strong); }
+
+  .stage-n {
+    font-family: var(--mono);
+    font-size: 1.45rem;
+    font-weight: 600;
+    color: var(--rule-strong);
+    line-height: 1.6;
+  }
+  .stage-body { display: flex; flex-direction: column; gap: 0.35rem; }
+  .stage h3 { margin: 0; font-size: 1.04rem; font-weight: 600; line-height: 1.5; }
+  .stage p { margin: 0; color: var(--ink-soft); font-size: 0.97rem; }
+  .stage .cost {
+    font-family: var(--display);
+    font-size: 0.83rem;
+    color: var(--ink-faint);
+  }
+
+  .gate {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.75rem;
+    margin-top: 0.4rem;
+    padding: 0.6rem 0.85rem;
+    background: var(--stop-bg);
+    color: var(--stop);
+    font-size: 0.92rem;
+    line-height: 1.65;
+  }
+  .gate .k {
+    font-family: var(--display);
+    font-size: 0.82rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  /* ---- ตาราง ---- */
+  .scroller { overflow-x: auto; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.94rem; }
+  caption {
+    text-align: left;
+    padding-bottom: 0.7rem;
+    color: var(--ink-soft);
+    font-size: 0.93rem;
+    line-height: 1.7;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.55rem 0.9rem 0.55rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: baseline;
+  }
+  thead th {
+    font-family: var(--display);
+    font-size: 0.84rem;
+    font-weight: 600;
+    color: var(--ink-faint);
+    border-bottom: 2px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+  td.num, th.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.ch { font-family: var(--mono); font-size: 0.85rem; }
+  td.rank {
+    font-family: var(--mono);
+    font-weight: 600;
+    color: var(--ink-faint);
+    width: 2.4rem;
+  }
+  tbody tr.top td.rank { color: var(--act); }
+  td .why { display: block; color: var(--ink-faint); font-size: 0.86rem; font-family: var(--body); }
+
+  /* ---- เกณฑ์ ---- */
+  .rules { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  @media (min-width: 46rem) { .rules { grid-template-columns: repeat(3, 1fr); } }
+
+  .rule { background: var(--surface); padding: 1.05rem 1.15rem; display: flex; flex-direction: column; gap: 0.3rem; }
+  .rule .k { font-family: var(--display); font-size: 0.86rem; color: var(--ink-faint); }
+  .rule .v { font-family: var(--display); font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.4; }
+  .rule p { font-size: 0.92rem; color: var(--ink-soft); margin: 0; }
+
+  /* ---- รายการห้าม ---- */
+  .never { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.85rem; }
+  .never li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.9rem;
+    padding-left: 0.9rem;
+    border-left: 3px solid var(--stop);
+  }
+  .never .k {
+    font-family: var(--display);
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: var(--stop);
+    white-space: nowrap;
+  }
+  .never p { margin: 0; font-size: 0.96rem; }
+
+  /* ---- ของใหม่ในรอบนี้ ---- */
+  .newly { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.85rem; }
+  .newly li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.9rem;
+    padding-left: 0.9rem;
+    border-left: 3px solid var(--act);
+  }
+  .newly .k {
+    font-family: var(--display);
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: var(--act);
+    white-space: nowrap;
+  }
+  .newly p { margin: 0; font-size: 0.96rem; }
+  .newly .tag {
+    display: inline-block;
+    font-family: var(--display);
+    font-size: 0.74rem;
+    font-weight: 600;
+    padding: 0.05rem 0.4rem;
+    border-radius: 0.25rem;
+    background: var(--act-bg);
+    color: var(--act);
+    margin-left: 0.35rem;
+    vertical-align: 0.08em;
+  }
+
+  /* ---- สถานะ ---- */
+  .status { display: grid; gap: 1.5rem; }
+  @media (min-width: 52rem) { .status { grid-template-columns: 1fr 1fr; } }
+
+  .stack { display: flex; flex-direction: column; gap: 0.5rem; }
+  .stack h3 { margin: 0 0 0.15rem; font-size: 1rem; font-weight: 600; }
+  .stack ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+  .stack li { display: grid; grid-template-columns: 1.1rem 1fr; gap: 0.6rem; font-size: 0.95rem; line-height: 1.7; }
+  .tick { font-family: var(--mono); font-weight: 600; line-height: 1.7; }
+  .done .tick { color: var(--act); }
+  .todo .tick { color: var(--hold); }
+
+  .evidence {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--act);
+    padding: 1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .evidence p { margin: 0; font-size: 0.95rem; color: var(--ink-soft); }
+  .evidence .fig { font-family: var(--mono); color: var(--ink); font-size: 0.95rem; }
+
+  footer {
+    border-top: 2px solid var(--rule-strong);
+    padding-top: 1.1rem;
+    font-size: 0.9rem;
+    color: var(--ink-faint);
+    max-width: var(--measure);
+  }
+
+  a { color: var(--act); text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--act); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">BigSeller · ระบบอัตโนมัติฝั่ง WMS · รายงานภายใน</div>
+    <h1>รายงานการทำงาน WaveEngine</h1>
+    <p class="standfirst">บอทที่ยืนยันคำสั่งซื้อใหม่และสร้าง Wave หยิบสินค้าใน BigSeller โดยควบคุมหน้าเว็บจริง
+      รายงานนี้อธิบายว่า 1 รอบทำงานทำอะไรบ้าง ใช้กฎอะไร และพิสูจน์ไปถึงไหนแล้ว</p>
+    <div class="state"><b>สถานะตอนนี้</b> <span>โหมดทดลอง — ยังไม่เปิดลำดับใดให้ทำงานจริง จึงไม่มีการคลิกใดๆ</span></div>
+    <div class="scope"><b>ขอบเขต</b> <span>ช่องทางขายหลักที่บอททำงานให้คือ <strong>Shopee · Lazada · TikTok</strong> เท่านั้น —
+      นอกจากนี้ (คำสั่งซื้อด้วยตนเอง, WooCommerce, POS, ทางแชท) ไม่แตะ</span></div>
+    <div class="meta">
+      <span><b>ข้อมูล ณ</b> <span class="num">11 ก.ย. 2026</span></span>
+      <span><b>คลัง</b> <span class="num">STOCK_5</span></span>
+      <span><b>Unit test</b> <span class="num">148</span> ผ่าน</span>
+      <span><b>ทำจริงไปแล้ว</b> ยืนยัน <span class="num">8</span> ใบ · สร้าง Wave <span class="num">1</span> อัน</span>
+    </div>
+  </header>
+
+  <section class="col">
+    <h2><span class="n">01</span>แทนงานอะไร</h2>
+    <p class="lede">งานที่พนักงานทำมือทั้งวันอยู่ 2 อย่าง หนึ่งคือไล่กดยืนยันคำสั่งซื้อใหม่ทีละหน้า
+      ตามลำดับความสำคัญที่อยู่ในหัวคน — ส่งทันที 2 ชั่วโมงต้องมาก่อนรอบ Lazada ปกติ เป็นต้น
+      สองคือเข้าหน้า WMS แล้วสร้าง Wave หยิบสินค้าจากของที่กองอยู่</p>
+    <p>ทั้งสองขั้นไม่มี API ให้เรียก บอทจึงทำแบบเดียวกับคน คือเปิดหน้า ตั้งตัวกรอง อ่านตัวเลข แล้วคลิก
+      ด้วยเหตุนี้กฎเกือบทั้งหมดในรายงานนี้จึงเป็นกฎว่า<strong>เมื่อไหร่ที่ห้ามคลิก</strong></p>
+  </section>
+
+  <section>
+    <h2><span class="n">02</span>1 รอบทำงาน ตั้งแต่ต้นจนจบ</h2>
+    <p class="col">รอบหนึ่งเริ่มจากคิวคำสั่งซื้อ แล้วถ้ามีการยืนยันเกิดขึ้นจึงไปต่อที่หน้าสร้าง Wave
+      ทุกด่านที่ตรวจสอบไม่ผ่านจะ<strong>จบรอบทิ้ง ไม่เดาต่อ</strong> — แถบสีแดงคือจุดที่บอทตั้งใจหยุดตัวเอง</p>
+
+    <div class="cycle">
+
+      <article class="stage">
+        <div class="stage-n">1</div>
+        <div class="stage-body">
+          <h3>อ่านตัวเลขที่ BigSeller นับไว้ให้แล้ว</h3>
+          <p>หน้าคำสั่งซื้อนับจำนวนแยกตามขนส่ง ร้านค้า แพลตฟอร์ม และคลังไว้อยู่แล้ว
+            อ่านตัวเลขในตัวกรองก็ตอบได้ทันทีว่าต้องทำอะไรก่อน โดยไม่ต้องไล่อ่านทีละแถว</p>
+          <p class="cost">ราว 2 วินาที · อ่านอย่างเดียว · คำสั่ง <span class="m">--board</span></p>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">2</div>
+        <div class="stage-body">
+          <h3>ดึงรายการที่ต้องกันออก</h3>
+          <p>สองชุด — กรองร้าน <span class="m">LockStock</span> เก็บเลขออเดอร์ของจอง และกรองแพลตฟอร์มที่ไม่ใช่
+            Shopee / Lazada / TikTok เก็บไว้อีกชุด เพราะในแถวไม่ได้บอกว่ามาจากร้านไหนหรือแพลตฟอร์มไหน
+            การกรองดูจึงเป็นทางเดียวที่จะรู้</p>
+          <p class="cost">แพลตฟอร์มต้องห้ามจะสแกนเฉพาะที่มีของ — วันไหนไม่มีก็ไม่เสียเวลา</p>
+          <div class="gate"><span class="k">อ่านไม่ได้ = จบรอบ</span><span>ถ้าดึงรายการใดไม่สำเร็จ จะทิ้งทั้งรอบทันที
+            เพราะการยืนยันของจองไปคือการส่งของที่กันไว้ให้ลูกค้าอีกคน</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">3</div>
+        <div class="stage-body">
+          <h3>กวาดคิวเฉพาะคลังที่ขายได้</h3>
+          <p>ตั้งตัวกรองคลังเป็น <span class="m">STOCK_5</span> แล้วอ่านกลับมาตรวจว่าตั้งติดจริง จากนั้นไล่ทุกหน้า
+            พร้อมกันซ้ำด้วยเลขออเดอร์ เพราะพนักงานกดยืนยันไปพร้อมกับที่บอทไล่หน้าอยู่ แถวจึงเลื่อนถอยหลังระหว่างหน้า</p>
+          <div class="gate"><span class="k">ตรวจยอด</span><span>เทียบจำนวนแถวที่กวาดได้กับตัวเลขในตัวกรอง
+            ถ้าสแกนพังจนได้มาแค่หน้าเดียวจากหกหน้า จะจบรอบแทนที่จะทำงานจากคิวที่ไม่ครบ</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">4</div>
+        <div class="stage-body">
+          <h3>ตัดสินใจทีละใบ</h3>
+          <p>แต่ละใบจะถูกจับคู่กับช่องทางขนส่ง แล้วแปลงเป็นลำดับความสำคัญกับกติกาเวลา ผลลัพธ์มี 4 แบบ —
+            ทำเลย รอรอบรถ ส่งให้คนทำ หรือข้ามไป ทุกการตัดสินใจถูกบันทึกพร้อมเหตุผลที่ทำให้ได้ผลนั้น</p>
+          <p class="cost">คำนวณล้วน ไม่แตะหน้าเว็บ · มี unit test คุมขั้นนี้ 141 เคส</p>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">5</div>
+        <div class="stage-body">
+          <h3>กดยืนยัน เรียงตามลำดับ</h3>
+          <p>กดเฉพาะใบที่ลำดับนั้นถูกเปิดไว้ชัดเจน จำกัดจำนวนต่อรอบ และเรียงคิวสามชั้น — ลำดับความสำคัญ
+            แล้วธงด่วน แล้ว<strong>ใบที่เข้ามาก่อนไปก่อน</strong> ซึ่งก็คือใบที่ใกล้หมดเวลาที่สุดในช่องทางนั้น
+            ก่อนคลิกจะอ่านแถวนั้นซ้ำอีกครั้ง และพิสูจน์ผลด้วยหลักฐาน 3 แบบ — แถวหายจากคิว ปุ่มยืนยันหายไป
+            หรือสถานะเปลี่ยนไม่ใช่ "ใหม่" แล้ว</p>
+          <div class="gate"><span class="k">ห้ามกดซ้ำ</span><span>ใบที่กดไปแล้วในรอบนี้จะไม่ถูกกดอีก
+            และถ้าพิสูจน์ผลไม่ได้จะบันทึกว่า "ยืนยันไม่ได้" ไม่ใช่ "สำเร็จ"</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">6</div>
+        <div class="stage-body">
+          <h3>สร้าง Wave ทีละขนส่ง</h3>
+          <p>ไล่ทีละเจ้าที่มีออเดอร์ถูกยืนยันไปจริง — ปักหมุดคลัง ติ๊กขนส่งเจ้านั้นเจ้าเดียว แล้วเปิดหน้าดูตัวอย่าง
+            BigSeller จะซอยออกมาเป็นแถว แถวละชั้นและวิธีหยิบ และแต่ละแถวจะกลายเป็น Wave ของตัวเอง</p>
+          <div class="gate"><span class="k">1 เจ้า = 1 Wave</span><span>ก่อนสร้างจะนับจำนวนขนส่งที่ติ๊กไว้
+            ถ้าไม่ใช่เจ้าเดียวพอดีจะไม่สร้าง Wave จะไม่มีการปนขนส่งข้ามเจ้าเด็ดขาด</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">7</div>
+        <div class="stage-body">
+          <h3>เลือกเฉพาะแถวที่คุ้มจะเดิน</h3>
+          <p>แถวข้ามชั้นถูกคัดออกและรายงานไว้ แถวที่จำนวนไม่ถึงเกณฑ์จะถูกเก็บไว้รอบหน้า
+            ที่เหลือจึงติ๊กเลือก แล้วนับจำนวนที่เลือกเทียบกับตารางอีกครั้งก่อนสร้างจริง</p>
+          <div class="gate"><span class="k">คืนหน้าจอ</span><span>ทำงานเสร็จจะคืนตัวกรองขนส่งเป็นค่าเดิม
+            คนที่มาเปิดหน้าต่อจะได้ไม่เจอขอบเขตแคบๆ ที่บอททิ้งค้างไว้</span></div>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">03</span>ลำดับความสำคัญและเวลารถ</h2>
+    <p class="col">12 ช่องทาง เรียงลำดับตายตัว ช่องขวาคือเงื่อนไขที่ทำให้ช่องทางนั้น<em>มีสิทธิ์</em>ทำงาน
+      แต่ถึงเงื่อนไขแล้วก็ยังต้องผ่านเกณฑ์ขนาด Wave ในหัวข้อ 04 อีกชั้น
+      และภายในลำดับเดียวกัน ใบที่เข้ามาก่อนจะถูกทำก่อนเสมอ</p>
+
+    <div class="scroller">
+      <table>
+        <caption>เวลารถถอดจากชื่อช่องทางเอง — Shopee 16:01 · Lazada 13:01 · TikTok 14:01</caption>
+        <thead>
+          <tr>
+            <th class="num">#</th>
+            <th>ช่องทางขนส่ง</th>
+            <th>ทำงานได้เมื่อไหร่</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="top">
+            <td class="rank">1</td>
+            <td class="ch">Shopee-TH-Express Delivery (SPX)</td>
+            <td>เช้า รอครบ 10 ใบ · ตั้งแต่ 13:00 มีกี่ใบก็ทำ<span class="why">กติกาบ่ายทับกติกาครบจำนวน</span></td>
+          </tr>
+          <tr class="top">
+            <td class="rank">2</td>
+            <td class="ch">Shopee-TH-Instant Delivery — ส่งทันที (แพ็ก 2 ชั่วโมง)</td>
+            <td>ทำถึง 11:45 · หยุด · เริ่มใหม่ 13:00<span class="why">พอเปิดรอบ 13:00 <strong>ดึงใบที่ค้างจากก่อน 11:45 ก่อน</strong>
+              แล้วไล่ตามเวลาที่ออเดอร์เข้ามา · SLA 2 ชั่วโมง จึงไม่รอรอบรถ</span></td>
+          </tr>
+          <tr class="top">
+            <td class="rank">3</td>
+            <td class="ch">Shopee-TH-Express Delivery (SHP Food)</td>
+            <td>เหมือนลำดับ 1</td>
+          </tr>
+          <tr>
+            <td class="rank">4</td>
+            <td class="ch">TikTok-TH-BEST Express + Shopee-TH-DHL Domestic</td>
+            <td class="num">14:01<span class="why">คู่เดียวที่รวม Wave ได้ — ใช้เวลาที่มาก่อนของสองเจ้า ไม่งั้น BEST ตกรถ</span></td>
+          </tr>
+          <tr><td class="rank">5</td><td class="ch">Lazada-TH-LEX TH</td><td class="num">13:01</td></tr>
+          <tr><td class="rank">6</td><td class="ch">Shopee-TH-SPX Express</td><td class="num">16:01</td></tr>
+          <tr><td class="rank">7</td><td class="ch">TikTok-TH-J&amp;T Express</td><td class="num">14:01</td></tr>
+          <tr><td class="rank">8</td><td class="ch">TikTok-TH-Flash Express Thailand</td><td class="num">14:01</td></tr>
+          <tr><td class="rank">9</td><td class="ch">Lazada-TH-Flash Express</td><td class="num">13:01</td></tr>
+          <tr><td class="rank">10</td><td class="ch">SPX Express(TH)</td><td class="num">16:01<span class="why">อนุมานเอง — ชื่อไม่มีแพลตฟอร์มติดมา</span></td></tr>
+          <tr><td class="rank">11</td><td class="ch">TikTok-TH-KEX Express Thailand</td><td class="num">14:01</td></tr>
+          <tr><td class="rank">12</td><td class="ch">Shopee-TH-Flash Express Bulky</td><td class="num">16:01</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">04</span>อะไรทำให้ Wave คุ้มที่จะสร้าง</h2>
+    <p class="col">1 Wave คือการเดินขึ้นไปหยิบ 1 รอบ บน 1 ชั้น — <strong>FANTECH อยู่ชั้น 5 ส่วน Ugreen อยู่ชั้น 3</strong>
+      ชื่อโซน <span class="m">3FL Ugreen</span> บอกไว้ตรงตัว ข้อเท็จจริงข้อเดียวนี้เป็นที่มาของกฎทั้งหมดในหัวข้อนี้</p>
+
+    <div class="rules">
+      <div class="rule">
+        <span class="k">แถวสินค้าเดียว</span>
+        <span class="v">50 พัสดุ</span>
+        <p>หยิบแล้วแพ็กจบ เดินรอบเดียวเคลียร์ได้เยอะ</p>
+      </div>
+      <div class="rule">
+        <span class="k">แถวหลายชนิด</span>
+        <span class="v">20 พัสดุ</span>
+        <p>ต้องหยิบและคัดแยกรายออเดอร์ รอบเดียวกันจึงรับได้น้อยกว่ามาก</p>
+      </div>
+      <div class="rule">
+        <span class="k">ของน้อยกว่าเกณฑ์</span>
+        <span class="v">รอ 30 นาที</span>
+        <p>สะสมแยกตามขนส่ง แล้วรวบส่งทีเดียว ไม่ใช่สร้าง Wave ทุกครั้งที่มีออเดอร์เข้า</p>
+      </div>
+    </div>
+
+    <div class="evidence col">
+      <p class="fig">Wave จริงเมื่อ 11 ก.ย. — 2 · 1 · 24 · 2 · 2 พัสดุ</p>
+      <p>เดิน 5 รอบเพื่อของ 31 พัสดุ และ 4 ใน 5 รอบคือขึ้นชั้นไปหยิบของ 1-2 ชิ้น
+        รอบนั้นคือที่มาของเกณฑ์ข้างบน ถ้าใช้กฎปัจจุบัน คิวชุดเดียวกันจะเหลือการเดินรอบเดียว</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">05</span>สิ่งที่จะไม่ทำเด็ดขาด</h2>
+    <ul class="never col">
+      <li>
+        <span class="k">นอกแพลตฟอร์ม</span>
+        <p>ไม่แตะออเดอร์จาก <strong>คำสั่งซื้อด้วยตนเอง · WooCommerce · POS · ทางแชท</strong>
+          และช่องทางอื่นที่ไม่ใช่ช่องทางขายหลัก เพราะเป็นงานของกระบวนการอื่น
+          ด่านนี้อยู่ชั้นนอกสุด ทับกฎอื่นทั้งหมด เพราะต้องตอบก่อนว่าระบบนี้มีสิทธิ์ยุ่งกับใบนั้นหรือเปล่า</p>
+      </li>
+      <li>
+        <span class="k">ของจอง</span>
+        <p>ไม่แตะออเดอร์ร้าน <span class="m">LockStock</span> เพราะเป็นของที่กันไว้ให้ลูกค้าที่ระบุตัวแล้ว
+          กันออกตั้งแต่ก่อนตัดสินใจ กันซ้ำตอนจัดลำดับ และกันอีกครั้งก่อนคลิก</p>
+      </li>
+      <li>
+        <span class="k">ผิดคลัง</span>
+        <p>ไม่ยืนยันออเดอร์ที่ไม่ได้อยู่ <span class="m">STOCK_5</span> เพราะคลังอื่นต้องให้คนย้ายของมาก่อน
+          และบอทไม่ย้ายสต็อกเองไม่ว่ากรณีใด</p>
+      </li>
+      <li>
+        <span class="k">ข้ามชั้น</span>
+        <p>ไม่เอาแถวข้ามชั้นใส่ Wave เพราะการหยิบแถวนั้นคือให้คนเดินขึ้นลงระหว่างชั้น 5 กับชั้น 3
+          เพื่อออเดอร์ใบเดียว แถวพวกนี้จะถูกรายงานไว้ให้คนจัดการ</p>
+      </li>
+      <li>
+        <span class="k">ปนกัน</span>
+        <p>ไม่สร้าง Wave ที่มีขนส่งเกินหนึ่งเจ้า และไม่ยืนยันออเดอร์เดิมซ้ำในรอบเดียวกัน</p>
+      </li>
+      <li>
+        <span class="k">เปิดเอง</span>
+        <p>ไม่เปิดโหมดทำงานจริงให้ตัวเอง ทุกลำดับปิดอยู่จนกว่าจะระบุเปิดทีละลำดับ</p>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">06</span>พิสูจน์ไปถึงไหนแล้ว</h2>
+    <div class="status">
+      <div class="stack done">
+        <h3>ทดสอบกับหน้าเว็บจริงแล้ว</h3>
+        <ul>
+          <li><span class="tick">✓</span><span>กวาดคิว ไล่หน้า และตรวจว่าสแกนครบ</span></li>
+          <li><span class="tick">✓</span><span>กันของจอง และกันคลังที่ไม่ใช่ STOCK_5</span></li>
+          <li><span class="tick">✓</span><span>กดยืนยันออเดอร์จริง 8 ใบ</span></li>
+          <li><span class="tick">✓</span><span>หน้าสร้าง Wave — ตั้งขอบเขต เปิดตัวอย่าง อ่านแถว จับแถวข้ามชั้น ติ๊กเลือก</span></li>
+          <li><span class="tick">✓</span><span>สร้าง Wave ครบวงจรจริง 1 อัน</span></li>
+        </ul>
+      </div>
+      <div class="stack todo">
+        <h3>เขียนเสร็จ ผ่านเทสต์ แต่ยังไม่เคยรันจริง</h3>
+        <ul>
+          <li><span class="tick">•</span><span>ลำดับ 12 ช่องทาง และกติกาเวลาของแต่ละช่องทาง</span></li>
+          <li><span class="tick">•</span><span>เกณฑ์ขนาด Wave 50 / 20 พัสดุ และการรอ 30 นาที</span></li>
+          <li><span class="tick">•</span><span>สร้าง Wave ตามขนส่งที่ยืนยันไปจริง แทนกลุ่มที่ล็อกไว้ตายตัว</span></li>
+          <li><span class="tick">•</span><span>การกันข้อมูลซ้ำ ซึ่งเป็นต้นเหตุของการกดยืนยันซ้ำเมื่อ 11 ก.ย.</span></li>
+          <li><span class="tick">•</span><span>การรอผลยืนยันนานขึ้น แทนของเดิม 8 วินาทีที่รายงานผลสำเร็จจริงว่าล้มเหลว</span></li>
+          <li><span class="tick">•</span><span>การกันแพลตฟอร์มนอก Shopee / Lazada / TikTok</span></li>
+          <li><span class="tick">•</span><span>การเรียงคิวจากใบที่เข้ามาก่อน</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="col">
+    <h2><span class="n">07</span>เรื่องที่รอการตัดสินใจ</h2>
+    <p>4 เรื่องนี้ติดที่คำตอบจากหน้างาน ไม่ได้ติดที่โค้ด</p>
+    <ul class="never">
+      <li><span class="k">ของที่เคยหลุด</span><p>ก่อน 11 ก.ย. บอทยังไม่ได้กรองแพลตฟอร์มเลย ในกลุ่ม
+        <span class="m">คำสั่งซื้อด้วยตนเอง</span> 79 ใบ มีของจองที่กันไว้แล้วราว 60 ใบ
+        <strong>แต่อีกราว 19 ใบไม่ใช่ของจอง และอยู่ในระยะที่บอทแตะได้</strong> ตอนนี้ปิดช่องนั้นแล้ว
+        แต่ควรไล่ดูว่าช่วงที่ผ่านมามีใบไหนถูกแตะไปหรือไม่</p></li>
+      <li><span class="k">ตัวกรองเวลา</span><p>ตัวกรอง <span class="m">เลือกเวลา</span> ยังใช้ค่าที่ค้างอยู่บนหน้าจอ
+        Wave จึงอาจดึงออเดอร์เก่าที่ยืนยันไว้แล้วเข้ามาด้วย ถ้าปักเป็น <span class="m">วันนี้</span> จะสะอาดกว่า
+        แต่เสี่ยงให้ของค้างเมื่อวานตกหล่นโดยไม่มีใครเห็น</p></li>
+      <li><span class="k">ยังไม่มีลำดับ</span><p>มีขนส่ง 3 เจ้าในระบบที่ยังไม่ได้จัดลำดับ —
+        <span class="m">SPX Express - ผู้ซื้อรับที่จุดบริการ</span>, <span class="m">Lazada-TH-Flash TH Bulky</span>,
+        <span class="m">Shopee-TH-Best Express Bulky</span> ตอนนี้จะตกไปคิวให้คนทำ ซึ่งปลอดภัยแต่ไม่มีใครดูแลอัตโนมัติ</p></li>
+      <li><span class="k">รวม Wave</span><p>BEST Express กับ DHL Domestic อนุมัติให้รวม Wave ได้แล้ว
+        แต่โค้ดยังแยกกันอยู่ และยังไม่เคยมีออเดอร์จริงของสองเจ้านี้ให้ทดสอบเลย</p></li>
+      <li><span class="k">ไม่มีวันกำหนดส่ง</span><p>Seller Delivery แบบรับหน้าร้านด่วนทำอัตโนมัติจากหน้ารายการไม่ได้
+        เพราะไม่มีช่อง <span class="m">กำหนดส่ง</span> ในหน้านั้นเลย ออเดอร์กลุ่มนี้จึงเข้าคิวให้คนทำเสมอ</p></li>
+    </ul>
+  </section>
+
+  <section class="col">
+    <h2><span class="n">08</span>เพิ่มใหม่รอบนี้ — 11 ก.ย. 2026</h2>
+    <p>ทั้งหมดนี้เขียนและผ่านเทสต์แล้ว แต่ยังไม่ได้เปิดรันกับหน้าเว็บจริง
+      เพราะโหมดทำงานจริงยังปิดอยู่ทุกลำดับตามที่ตกลงกันไว้</p>
+    <ul class="newly">
+      <li><span class="k">กรองแพลตฟอร์ม</span><p>เพิ่มด่านชั้นนอกสุด — รับเฉพาะ
+        <strong>Shopee · Lazada · TikTok</strong> ใบที่มาจากช่องทางอื่นจะถูกตัดออกก่อนตรวจอย่างอื่นทั้งหมด
+        ด่านนี้ทับทุกกฎ ต่อให้ใบนั้นครบเงื่อนไขเวลาและจำนวนก็ไม่ทำ<span class="tag">ของใหม่</span></p></li>
+      <li><span class="k">ใบเก่าก่อน</span><p>ภายในลำดับเดียวกัน เรียงตาม<strong>เวลาที่ออเดอร์เข้ามา</strong>
+        ใบที่เข้ามาก่อนได้ทำก่อนเสมอ ใบที่อ่านเวลาไม่ได้จะไปต่อท้ายแถวแทนที่จะถูกทิ้ง<span class="tag">ของใหม่</span></p></li>
+      <li><span class="k">รอบ 11:45</span><p>Instant Delivery หยุดที่ 11:45 และเปิดใหม่ 13:00 —
+        พอเปิดรอบบ่าย <strong>ต้องเคลียร์ใบที่ค้างจากก่อน 11:45 ให้หมดก่อน</strong> แล้วค่อยไล่ใบใหม่
+        เพราะใบกลุ่มนั้นเดินนาฬิกา SLA 2 ชั่วโมงมาแล้ว<span class="tag">ของใหม่</span></p></li>
+      <li><span class="k">เกณฑ์ขนาด</span><p>Wave แถวสินค้าเดียวต้องมีอย่างน้อย <strong>50 พัสดุ</strong>
+        แถวหลายชนิดอย่างน้อย <strong>20 พัสดุ</strong> ถ้ายังไม่ถึงจะรอ <strong>30 นาที</strong> นับจาก Wave
+        ล่าสุดของขนส่งเจ้านั้นแล้วค่อยพิจารณาใหม่ ตัวนับนี้เก็บลงไฟล์ จึงอยู่ข้ามรอบรัน</p></li>
+      <li><span class="k">กันกดซ้ำ</span><p>ตัดออเดอร์ซ้ำข้ามหน้าด้วยเลขที่ออเดอร์ และจำใบที่กดไปแล้วในรอบนั้น
+        เป็นการปิดต้นเหตุของเหตุกดยืนยันซ้ำเมื่อ 11 ก.ย. พร้อมขยายเวลารอผลยืนยันเป็น
+        <strong>30 วินาที</strong> อ่าน 3 สัญญาณ แทนของเดิม 8 วินาทีที่เคยรายงานว่าล้มเหลวทั้งที่สำเร็จ</p></li>
+      <li><span class="k">คืนหน้าจอ</span><p>จบงานแล้วคืนตัวกรองขนส่งบนหน้าสร้าง Wave กลับเป็นค่าเดิม
+        และปิดป๊อปอัปแนะนำเปลี่ยนภาษาด้วยการซ่อนทิ้ง แทนการคลิกซึ่งเคยไปเปิดเมนูภาษาค้างไว้ให้คนถัดไป</p></li>
+    </ul>
+  </section>
+
+  <footer>
+    ตัวเลขในรายงานนี้มาจากการรันจริงวันที่ 10–11 กันยายน 2026 และตั้งใจไม่ใส่เลขออเดอร์หรือชื่อลูกค้า
+    บอทบันทึกการตัดสินใจไว้บรรทัดละ 1 ออเดอร์ที่ <span class="m">logs/wave-engine-YYYY-MM-DD.jsonl</span>
+    ซึ่งใช้ย้อนดูเหตุผลรายใบได้
+  </footer>
+
+</div>

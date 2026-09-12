@@ -11,6 +11,8 @@ import {
 } from '../src/wave-engine/tiers.js';
 import { assertScanIsComplete, extractDeliveryDateText, toScannedOrder } from '../src/bigseller/order-priority-page.js';
 import { minParcelsForWaveType, shouldWaveNow } from '../src/wave-engine/wave-state.js';
+import { isUnrecoverableBrowserError } from '../src/wave-engine/scheduler.js';
+import { floorForPosition, resolveSkuAliases, skusInProductCell } from '../src/wave-engine/sku-floor.js';
 
 /** Config built from an explicit env map so these tests never depend on the developer's own .env. */
 function config(overrides: Record<string, string> = {}): WaveEngineConfig {
@@ -27,6 +29,8 @@ function order(overrides: Partial<ScannedOrder> = {}): ScannedOrder {
     deliveryDate: null,
     warehouse: 'STOCK_5',
     isReserved: false,
+    isBlockedPlatform: false,
+    orderTime: null,
     ...overrides,
   };
 }
@@ -323,6 +327,25 @@ test.describe('scan completeness', () => {
   });
 });
 
+test.describe('exclusion-list scans are checked exactly', () => {
+  test('the queue tolerance does not apply — one missing row is one order that looks eligible', () => {
+    expect(() => assertScanIsComplete(59, 60, 'exact')).toThrow(/Exclusion scan is incomplete/);
+    // The same shortfall is fine on the live queue, where staff are confirming
+    // alongside the bot.
+    expect(() => assertScanIsComplete(59, 60)).not.toThrow();
+  });
+
+  test('a complete read passes, and so does a filter that grew while scanning', () => {
+    expect(() => assertScanIsComplete(60, 60, 'exact')).not.toThrow();
+    expect(() => assertScanIsComplete(62, 60, 'exact')).not.toThrow();
+  });
+
+  test('an unreadable count fails instead of silently excluding nobody', () => {
+    expect(() => assertScanIsComplete(0, undefined, 'exact')).toThrow(/Scan is unverifiable/);
+    expect(() => assertScanIsComplete(79, undefined, 'exact')).toThrow(/Scan is unverifiable/);
+  });
+});
+
 test.describe('reserved-store guardrail — ของจอง is left alone', () => {
   test('a reservation is skipped, not confirmed, whatever its tier', () => {
     const decision = classifyOrder(order({ isReserved: true, warehouse: 'STOCK_5' }), config(), {
@@ -459,10 +482,21 @@ test.describe('wave batching — full load now, short load after the window', ()
     expect(verdict.reason).toContain('still collecting');
   });
 
-  test('a short load goes once the window has elapsed', () => {
-    const verdict = shouldWaveNow({ ...base, parcels: 6, lastWaveAt: new Date('2026-09-11T06:25:00Z').toISOString() });
-    expect(verdict.wave).toBe(true);
-    expect(verdict.reason).toContain('batched over');
+  test('waiting lowers the bar but never removes it', () => {
+    // Rule restated 2026-09-12: only wave once the target is reached
+    // ("งานที่ตั้งไว้ครบ ตามเป้าก็ทำ"). A batch that has waited out the window
+    // and is STILL short is a trip upstairs for a handful of parcels, which is
+    // the picking-1-2-at-a-time problem this engine exists to remove.
+    const stillShort = shouldWaveNow({ ...base, parcels: 6, lastWaveAt: new Date('2026-09-11T06:25:00Z').toISOString() });
+    expect(stillShort.wave).toBe(false);
+    expect(stillShort.reason).toContain('floor');
+
+    const onTarget = shouldWaveNow({
+      ...base,
+      parcels: base.minParcels,
+      lastWaveAt: new Date('2026-09-11T06:25:00Z').toISOString(),
+    });
+    expect(onTarget.wave).toBe(true);
   });
 
   test('zero parcels never waves', () => {
@@ -492,5 +526,142 @@ test.describe('per-type wave thresholds', () => {
 
   test('an unfamiliar type takes the smaller threshold so it cannot sit forever', () => {
     expect(minParcelsForWaveType('Wave สินค้าขายดี', thresholds).min).toBe(20);
+  });
+});
+
+test.describe('platform allowlist — only Shopee / Lazada / TikTok', () => {
+  test('an order from a blocked platform is skipped whatever its priority', () => {
+    const decision = classifyOrder(order({ isBlockedPlatform: true }), config(), {
+      now: AFTERNOON,
+      channelPendingCounts: {},
+    });
+    expect(decision.action).toBe('skip');
+    expect(decision.reason).toContain('EXCLUDED_PLATFORM');
+  });
+
+  test('the platform decides even over a reserved order', () => {
+    // Applied last on purpose: whether this engine has any business with the
+    // order at all is a platform question.
+    const decision = classifyOrder(order({ isBlockedPlatform: true, isReserved: true }), config(), {
+      now: AFTERNOON,
+      channelPendingCounts: {},
+    });
+    expect(decision.reason).toContain('EXCLUDED_PLATFORM');
+  });
+
+  test('the three marketplaces are the default allowlist', () => {
+    expect(config().allowedPlatforms).toEqual(['Shopee', 'Lazada', 'TikTok']);
+  });
+
+  test('a marketplace order is untouched by the guard', () => {
+    const decision = classifyOrder(order({ isBlockedPlatform: false }), config(), {
+      now: AFTERNOON,
+      channelPendingCounts: {},
+    });
+    expect(decision.action).toBe('confirm_now');
+  });
+});
+
+test.describe('oldest order acts first', () => {
+  const at = (iso: string, extra: Partial<ScannedOrder> = {}) => {
+    const o = order({ orderTime: new Date(iso).getTime(), ...extra });
+    return { order: o, decision: classifyOrder(o, config(), { now: AFTERNOON, channelPendingCounts: {} }) };
+  };
+
+  test('within a priority, the order that came in first goes first', () => {
+    const newer = at('2026-09-11T04:00:00Z');
+    const older = at('2026-09-11T02:00:00Z');
+    expect(sortByPriority([newer, older])[0]).toBe(older);
+  });
+
+  test('an unreadable timestamp sorts last instead of jumping the queue', () => {
+    const dated = at('2026-09-11T04:00:00Z');
+    const undatedOrder = order({ orderTime: null });
+    const undated = {
+      order: undatedOrder,
+      decision: classifyOrder(undatedOrder, config(), { now: AFTERNOON, channelPendingCounts: {} }),
+    };
+    expect(sortByPriority([undated, dated])[0]).toBe(dated);
+  });
+
+  test('priority still outranks age', () => {
+    const oldLowPriority = at('2026-09-11T01:00:00Z', { logisticsChannel: 'Shopee-TH-SPX Express' });
+    const newHighPriority = at('2026-09-11T09:00:00Z', { logisticsChannel: 'Shopee-TH-Express Delivery (SPX)' });
+    expect(sortByPriority([oldLowPriority, newHighPriority])[0]).toBe(newHighPriority);
+  });
+});
+
+test.describe('the daemon stops instead of ticking against a dead browser', () => {
+  test('recognises the errors a closed browser actually produces', () => {
+    // Both seen live on 2026-09-11, three hours apart, from the same daemon.
+    expect(isUnrecoverableBrowserError('page.evaluate: Target page, context or browser has been closed')).toBe(true);
+    expect(isUnrecoverableBrowserError('locator.evaluateAll: Target page, context or browser has been closed')).toBe(true);
+    expect(isUnrecoverableBrowserError('Target crashed')).toBe(true);
+  });
+
+  test('a normal cycle failure still lets the next tick try again', () => {
+    expect(isUnrecoverableBrowserError('Scan is incomplete: collected 81 row(s) but the active filter reports 1619.')).toBe(false);
+    expect(isUnrecoverableBrowserError('locator.click: Timeout 30000ms exceeded.')).toBe(false);
+  });
+});
+
+test.describe('which floor an order is picked from', () => {
+  test('the floor comes from the position code, not the brand', () => {
+    expect(floorForPosition('F02-13-09').floor).toBe('ชั้น 5');
+    expect(floorForPosition('3B-33-21').floor).toBe('ชั้น 3');
+    expect(floorForPosition('CR-033').floor).toBe('ชั้น 3');
+    // FAN-* products are stocked in the 3FL Ugreen area too, so "FANTECH means
+    // floor 5" is true of the AREA and false of the BRAND.
+    expect(floorForPosition('01U-11-03').floor).toBe('ชั้น 3');
+  });
+
+  test('a position that is not a pick face says so instead of guessing a floor', () => {
+    expect(floorForPosition('PC-019')).toMatchObject({ floor: null, blockedReason: 'Storage Area' });
+    expect(floorForPosition('ZZZZ')).toMatchObject({ floor: null, blockedReason: 'กองรอเข้าชั้น' });
+  });
+
+  test('SKUs are read from the token before each copy link, not from loose tokens', () => {
+    // A price or a stock figure must never be mistaken for one of this repo's
+    // 1,185 purely numeric SKUs.
+    expect(skusInProductCell('SPK7448-PK คัดลอก สีชมพู THB 259 1 สต็อกพร้อมขาย 392')).toEqual(['SPK7448-PK']);
+    expect(skusInProductCell('A-1 คัดลอก ดำ THB 10 1 B-2 คัดลอก ขาว THB 20 1')).toEqual(['A-1', 'B-2']);
+  });
+
+  test('split-pack and gift-set codes resolve to what is actually picked', () => {
+    expect(resolveSkuAliases('65573-SINGLE')).toEqual(['65573']);
+    expect(resolveSkuAliases('75104-BOX-SINGLE')).toEqual(['75104']);
+    // Both halves count — a set spanning two floors is a cross-floor pick.
+    expect(resolveSkuAliases('GIFT-25830-45063')).toEqual(['25830', '45063']);
+    expect(resolveSkuAliases('GIFT-75701SR-16182-16183')).toEqual(['75701SR', '75701', '16182', '16183']);
+    expect(resolveSkuAliases('85237')).toEqual([]);
+  });
+});
+
+test.describe('a courier variant never inherits a rank from the name it sits inside', () => {
+  test('the SPX service-point pickup is not treated as ordinary SPX Express', () => {
+    // Its name contains "Shopee-TH-SPX Express" word for word, which used to
+    // hand it priority 6. It is a different job and has no rank yet.
+    expect(resolveLogisticsChannel('Shopee-TH-SPX Express - ผู้ซื้อรับที่จุดบริการ SPX [ Pick up ]', config())).toBe('');
+    expect(classifyOrder(order({ rawShippingCell: 'Shopee-TH-SPX Express - ผู้ซื้อรับที่จุดบริการ SPX', logisticsChannel: '' }), config(), {
+      now: AFTERNOON,
+      channelPendingCounts: {},
+    }).action).not.toBe('confirm_now');
+  });
+
+  test('the ordinary channel it sits inside still resolves normally', () => {
+    expect(resolveLogisticsChannel('Shopee-TH-SPX Express [ Pick up ] เพิ่มข้อมูลการรับสินค้า', config())).toBe(
+      'Shopee-TH-SPX Express',
+    );
+  });
+
+  test('the instant channel keeps resolving through its display suffix', () => {
+    expect(
+      resolveLogisticsChannel('Shopee-TH-Instant Delivery - ส่งทันที (แพ็ก 2 ชั่วโมง)', config()),
+    ).toBe('Shopee-TH-Instant Delivery');
+  });
+
+  test('an unranked Bulky courier stays unranked', () => {
+    expect(resolveLogisticsChannel('Lazada-TH-Flash TH Bulky', config())).toBe('');
+    expect(resolveLogisticsChannel('Shopee-TH-Flash Express', config())).toBe('');
   });
 });

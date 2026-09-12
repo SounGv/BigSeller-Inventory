@@ -106,7 +106,20 @@ export async function installRegionRedirectAutoDismiss(context: BrowserContext):
 export async function installLanguageGuideSuppressor(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     const style = document.createElement('style');
-    style.textContent = '[class*="language_switch_guide"]{display:none !important;}';
+    style.textContent = [
+      '[class*="language_switch_guide"]{display:none !important;}',
+      // Ant tooltips are hint bubbles, but they sit ABOVE the filter pills and
+      // swallow every click aimed at them. Confirmed live 2026-09-12: the
+      // "ตั้งค่าการคัดกรอง" tooltip blocked a reset to ทั้งหมด through all five
+      // retries ("ant-tooltip-inner ... intercepts pointer events"), which left
+      // the page filtered to one store and a whole morning read as empty.
+      //
+      // Made click-through rather than hidden: the bubble is a real part of the
+      // UI a person may be reading, and hiding elements the site expects to be
+      // there has bitten this project before. Nothing the bot needs is inside
+      // one.
+      '.ant-tooltip, .ant-tooltip-inner, .ant-tooltip-arrow{pointer-events:none !important;}',
+    ].join('');
     document.documentElement.appendChild(style);
   });
 }

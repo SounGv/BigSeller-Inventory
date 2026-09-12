@@ -105,6 +105,18 @@ export function shouldWaveNow(params: {
 
   const elapsedMinutes = (now.getTime() - new Date(lastWaveAt).getTime()) / 60000;
   if (elapsedMinutes >= intervalMinutes) {
+    // Waiting lowers the bar; it never removes it. The window exists so a
+    // steady trickle still goes out, not so that a wave of two parcels gets
+    // created because half an hour passed — that is a picker walking up a
+    // floor for two items, which is the thing this whole engine is meant to
+    // stop ("จำนวนน้อยอย่าสร้างนะ", and staff picking 1-2 at a time is the
+    // problem being solved, restated 2026-09-12).
+    if (parcels < minParcels) {
+      return {
+        wave: false,
+        reason: `${parcels} parcel(s) still under the ${minParcels} floor after ${Math.round(elapsedMinutes)} min — not worth a trip, left for a person`,
+      };
+    }
     return {
       wave: true,
       reason: `${parcels} parcel(s) batched over ${Math.round(elapsedMinutes)} min (window ${intervalMinutes} min) — waving the batch`,

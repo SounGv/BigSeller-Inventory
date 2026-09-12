@@ -37,6 +37,26 @@ export interface SchedulerHandle {
 }
 
 /** ±jitterSeconds around the base interval so the bot never fires on an exact fixed cadence (spec §5a). Floored at 30s so a misconfigured interval can't turn into a hot loop against BigSeller. */
+/**
+ * A failure the next tick cannot possibly recover from: the browser, context
+ * or page is gone, so every later cycle will fail the same way.
+ *
+ * Seen live on 2026-09-11 — a daemon whose browser had died kept ticking for
+ * over three hours, logging an identical error every ~3 minutes and doing no
+ * work. That is worse than exiting: the log looks busy, the process looks
+ * alive, and nobody is told the bot stopped working.
+ */
+export function isUnrecoverableBrowserError(message: string): boolean {
+  return (
+    message.includes('Target page, context or browser has been closed') ||
+    message.includes('Target crashed') ||
+    message.includes('Browser has been closed') ||
+    message.includes('browser has been closed') ||
+    message.includes('Protocol error') ||
+    message.includes('has been closed')
+  );
+}
+
 export function nextDelayMs(baseMinutes: number, jitterSeconds: number): number {
   const jitterMs = (Math.random() * 2 - 1) * jitterSeconds * 1000;
   return Math.max(30_000, baseMinutes * 60_000 + jitterMs);
@@ -63,19 +83,42 @@ export function startScheduler(config: WaveEngineConfig, handlers: SchedulerHand
       if (stopped) return;
       const delay = nextDelayMs(baseMinutes, config.jitterSeconds);
       const timer = setTimeout(async () => {
+        let fatal = false;
         await lock.run(name, handler).catch(async (error) => {
+          const message = (error as Error).message;
           // A failing cycle must not kill the daemon — the next tick re-scans
           // from scratch anyway, and an unattended bot that silently exits at
           // 09:10 is worse than one that logs and keeps going.
-          await logger.error(`wave-engine: "${name}" cycle failed: ${(error as Error).message}`);
+          //
+          // A dead browser is the exception: it cannot come back on its own,
+          // so retrying only buries the real event under identical errors.
+          // Same policy as a dead session — stop and ask for a human.
+          if (isUnrecoverableBrowserError(message)) {
+            fatal = true;
+            await logger.error(
+              `wave-engine: "${name}" cycle failed and the browser is gone (${message}) — stopping the daemon. Restart it.`,
+            );
+            return null;
+          }
+          await logger.error(`wave-engine: "${name}" cycle failed: ${message}`);
           return null;
         });
+        if (fatal) {
+          stop();
+          return;
+        }
         arm();
       }, delay);
       timers.push(timer);
       void logger.info(`wave-engine: next "${name}" tick in ${Math.round(delay / 1000)}s`);
     };
     arm();
+  };
+
+  const stop = () => {
+    stopped = true;
+    for (const timer of timers) clearTimeout(timer as NodeJS.Timeout);
+    clearInterval(clockTimer);
   };
 
   scheduleLoop('urgent', config.urgentLoopMinutes, handlers.runUrgent);
@@ -103,11 +146,5 @@ export function startScheduler(config: WaveEngineConfig, handlers: SchedulerHand
   }, 60_000);
   timers.push(clockTimer);
 
-  return {
-    stop: () => {
-      stopped = true;
-      for (const timer of timers) clearTimeout(timer as NodeJS.Timeout);
-      clearInterval(clockTimer);
-    },
-  };
+  return { stop };
 }

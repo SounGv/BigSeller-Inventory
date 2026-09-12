@@ -1,0 +1,621 @@
+<title>WaveEngine Operations Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground: #eceff1;
+    --surface: #ffffff;
+    --surface-sunk: #e3e8eb;
+    --ink: #142029;
+    --ink-soft: #465966;
+    --ink-faint: #6c7e8a;
+    --rule: #cdd6db;
+    --rule-strong: #aebac2;
+
+    --act: #0f6d5c;
+    --act-bg: #dceee9;
+    --hold: #96570a;
+    --hold-bg: #f6e8d4;
+    --stop: #92302f;
+    --stop-bg: #f6dedd;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 66ch;
+    --step: clamp(0.5rem, 1.6vw, 1rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f171c;
+      --surface: #161f26;
+      --surface-sunk: #1d272f;
+      --ink: #e4ecf1;
+      --ink-soft: #a3b4bf;
+      --ink-faint: #7e909c;
+      --rule: #2b3841;
+      --rule-strong: #3d4d58;
+
+      --act: #45c2a6;
+      --act-bg: #10332d;
+      --hold: #d79a45;
+      --hold-bg: #33260f;
+      --stop: #e08886;
+      --stop-bg: #371a1a;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0f171c;
+    --surface: #161f26;
+    --surface-sunk: #1d272f;
+    --ink: #e4ecf1;
+    --ink-soft: #a3b4bf;
+    --ink-faint: #7e909c;
+    --rule: #2b3841;
+    --rule-strong: #3d4d58;
+
+    --act: #45c2a6;
+    --act-bg: #10332d;
+    --hold: #d79a45;
+    --hold-bg: #33260f;
+    --stop: #e08886;
+    --stop-bg: #371a1a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 74rem;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 4vw, 3.5rem) clamp(1rem, 4vw, 2.5rem) 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(2.5rem, 5vw, 4rem);
+  }
+
+  .col { max-width: var(--measure); }
+
+  h1, h2, h3, .label { font-family: var(--display); text-wrap: balance; }
+
+  .label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  /* ---- masthead ---- */
+  .masthead { display: flex; flex-direction: column; gap: 1.25rem; }
+
+  .masthead h1 {
+    margin: 0;
+    font-size: clamp(2.1rem, 5.4vw, 3.4rem);
+    font-weight: 700;
+    letter-spacing: -0.021em;
+    line-height: 1.05;
+  }
+
+  .standfirst {
+    margin: 0;
+    max-width: var(--measure);
+    font-size: clamp(1.05rem, 2.1vw, 1.24rem);
+    color: var(--ink-soft);
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.75rem;
+    padding-top: 1rem;
+    border-top: 2px solid var(--rule-strong);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+  }
+  .meta b { color: var(--ink); font-weight: 500; }
+
+  .state {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.55rem;
+    align-self: flex-start;
+    padding: 0.5rem 0.9rem;
+    background: var(--hold-bg);
+    color: var(--hold);
+    border-left: 3px solid currentColor;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  .state b { font-weight: 600; }
+
+  /* ---- sections ---- */
+  section { display: flex; flex-direction: column; gap: 1.25rem; }
+
+  h2 {
+    margin: 0;
+    font-size: clamp(1.4rem, 2.9vw, 1.85rem);
+    font-weight: 600;
+    letter-spacing: -0.012em;
+  }
+
+  h2 .n {
+    font-family: var(--mono);
+    font-size: 0.78em;
+    font-weight: 500;
+    color: var(--ink-faint);
+    margin-right: 0.6rem;
+  }
+
+  p { margin: 0 0 0.9rem; }
+  p:last-child { margin-bottom: 0; }
+
+  .lede { font-size: 1.06rem; }
+
+  strong { font-weight: 600; }
+
+  code, .m { font-family: var(--mono); font-size: 0.87em; }
+  code {
+    background: var(--surface-sunk);
+    padding: 0.08em 0.36em;
+    border-radius: 2px;
+  }
+
+  /* ---- cycle ---- */
+  .cycle { display: flex; flex-direction: column; gap: 0; }
+
+  .stage {
+    display: grid;
+    grid-template-columns: 3.2rem 1fr;
+    gap: 0 1.4rem;
+    padding: 1.15rem 0;
+    border-top: 1px solid var(--rule);
+  }
+  .stage:first-child { border-top: 2px solid var(--rule-strong); }
+  .stage:last-child { border-bottom: 2px solid var(--rule-strong); }
+
+  .stage-n {
+    font-family: var(--mono);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--rule-strong);
+    line-height: 1.1;
+  }
+  .stage-body { display: flex; flex-direction: column; gap: 0.45rem; }
+  .stage h3 {
+    margin: 0;
+    font-size: 1.06rem;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+  .stage p { margin: 0; color: var(--ink-soft); font-size: 0.97rem; }
+  .stage .cost {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--ink-faint);
+  }
+
+  .gate {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    margin-top: 0.35rem;
+    padding: 0.55rem 0.8rem;
+    background: var(--stop-bg);
+    color: var(--stop);
+    font-size: 0.9rem;
+    line-height: 1.45;
+  }
+  .gate .k {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    padding-top: 0.15em;
+  }
+
+  /* ---- tables ---- */
+  .scroller { overflow-x: auto; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.93rem;
+  }
+  caption {
+    text-align: left;
+    padding-bottom: 0.7rem;
+    color: var(--ink-soft);
+    font-size: 0.94rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.9rem 0.6rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: baseline;
+  }
+  thead th {
+    font-family: var(--display);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 2px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+  td.num, th.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.rank {
+    font-family: var(--mono);
+    font-weight: 600;
+    color: var(--ink-faint);
+    width: 2.5rem;
+  }
+  tbody tr.top td.rank { color: var(--act); }
+  td .why { display: block; color: var(--ink-faint); font-size: 0.85rem; }
+
+  /* ---- rule cards ---- */
+  .rules { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  @media (min-width: 46rem) { .rules { grid-template-columns: repeat(3, 1fr); } }
+
+  .rule {
+    background: var(--surface);
+    padding: 1.1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .rule .k { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.06em; color: var(--ink-faint); }
+  .rule .v { font-family: var(--display); font-size: 1.28rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rule p { font-size: 0.9rem; color: var(--ink-soft); margin: 0; }
+
+  /* ---- never list ---- */
+  .never { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.7rem; }
+  .never li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.9rem;
+    padding-left: 0.9rem;
+    border-left: 3px solid var(--stop);
+  }
+  .never .k {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--stop);
+    padding-top: 0.28em;
+    white-space: nowrap;
+  }
+  .never p { margin: 0; font-size: 0.95rem; }
+
+  /* ---- status ---- */
+  .status { display: grid; gap: 1.5rem; }
+  @media (min-width: 52rem) { .status { grid-template-columns: 1fr 1fr; } }
+
+  .stack { display: flex; flex-direction: column; gap: 0.55rem; }
+  .stack h3 { margin: 0 0 0.2rem; font-size: 0.95rem; font-weight: 600; }
+  .stack ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.45rem; }
+  .stack li { display: grid; grid-template-columns: 1.2rem 1fr; gap: 0.6rem; font-size: 0.94rem; line-height: 1.5; }
+  .tick { font-family: var(--mono); font-weight: 600; }
+  .done .tick { color: var(--act); }
+  .todo .tick { color: var(--hold); }
+
+  .evidence {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--act);
+    padding: 1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .evidence p { margin: 0; font-size: 0.94rem; color: var(--ink-soft); }
+  .evidence .fig { font-family: var(--mono); color: var(--ink); }
+
+  footer {
+    border-top: 2px solid var(--rule-strong);
+    padding-top: 1.1rem;
+    font-size: 0.88rem;
+    color: var(--ink-faint);
+    max-width: var(--measure);
+  }
+
+  a { color: var(--act); text-underline-offset: 2px; }
+  a:focus-visible, :focus-visible { outline: 2px solid var(--act); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="label">BigSeller · WMS automation · internal report</div>
+    <h1>WaveEngine Operations Report</h1>
+    <p class="standfirst">A bot that confirms new orders and builds picking waves in BigSeller, by driving the real
+      web UI. This is what one cycle does, the rules it follows, and how far it has actually been proven.</p>
+    <div class="state"><b>Current state</b> <span>dry run — no priority is enabled, so nothing is clicked</span></div>
+    <div class="meta">
+      <span><b>As of</b> 11 Sep 2026</span>
+      <span><b>Warehouse</b> STOCK_5</span>
+      <span><b>Unit tests</b> 141 passing</span>
+      <span><b>Live to date</b> 8 orders confirmed · 1 wave created</span>
+    </div>
+  </header>
+
+  <section class="col">
+    <h2><span class="n">01</span>What it replaces</h2>
+    <p class="lede">Two jobs staff do by hand all day. First, confirming new orders one screen at a time, in an order
+      that only exists in people's heads — the two-hour Shopee channel before the standard Lazada round, and so on.
+      Second, opening the WMS and generating picking waves for whatever has piled up.</p>
+    <p>Neither step has an API. The engine does what a person does: opens the page, sets the filters, reads the
+      counts, and clicks. That is why almost every rule below is a rule about <em>not</em> clicking.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">02</span>One cycle, start to finish</h2>
+    <p class="col">A cycle runs on the order queue and, if anything was confirmed, continues into the wave page. Any
+      gate that cannot be verified ends the cycle instead of guessing — the red bars are the points where the engine
+      deliberately stops.</p>
+
+    <div class="cycle">
+
+      <article class="stage">
+        <div class="stage-n">1</div>
+        <div class="stage-body">
+          <h3>Read the queue's own counts</h3>
+          <p>BigSeller already counts the queue by courier, store, platform and warehouse. Reading those filter
+            numbers answers “what do I confirm first” without walking a single row.</p>
+          <p class="cost">~2 seconds · read only · <span class="m">--board</span></p>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">2</div>
+        <div class="stage-body">
+          <h3>Collect the reservation list</h3>
+          <p>Filter to the <span class="m">LockStock</span> store and collect its order ids. A row never says which
+            store it came from, so this is the only way to know which orders are stock a salesperson is holding
+            rather than something to ship.</p>
+          <div class="gate"><span class="k">FAIL CLOSED</span><span>If that list cannot be read, the whole cycle is
+            abandoned. Confirming a reservation would ship goods held for another customer.</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">3</div>
+        <div class="stage-body">
+          <h3>Scan the picking warehouse</h3>
+          <p>Pin the warehouse filter to <span class="m">STOCK_5</span>, verify it took, then walk every page —
+            deduplicating by order id, because staff are confirming orders at the same time and rows shift backwards
+            between pages while the bot paginates.</p>
+          <div class="gate"><span class="k">VERIFY</span><span>Row count is checked against the filter's own figure.
+            A structurally broken scan (one page of six) ends the cycle rather than acting on a partial queue.</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">4</div>
+        <div class="stage-body">
+          <h3>Decide, per order</h3>
+          <p>Each order resolves to a channel, then to a priority and a timing rule — act now, wait for its truck,
+            hand to a human, or skip entirely. Every decision is written to an audit line with the reason that
+            produced it.</p>
+          <p class="cost">pure logic · no page access · 141 unit tests cover this step</p>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">5</div>
+        <div class="stage-body">
+          <h3>Confirm, in priority order</h3>
+          <p>Only orders whose priority is explicitly enabled are clicked, most urgent first, capped per cycle. Each
+            row is re-read immediately before its click, and the result is proven three ways — the row leaves the
+            list, its confirm control disappears, or its status stops reading as new.</p>
+          <div class="gate"><span class="k">NEVER TWICE</span><span>An order already attempted in this cycle is
+            never clicked again, and an unverified click is logged as unverified, never as success.</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">6</div>
+        <div class="stage-body">
+          <h3>Build waves — one carrier at a time</h3>
+          <p>For each courier that actually had an order confirmed: pin the warehouse, set the courier as the only
+            scope, and open the preview. BigSeller splits it into rows — one per floor, per pick method — and each
+            row becomes its own wave.</p>
+          <div class="gate"><span class="k">ONE CARRIER</span><span>The scope is asserted to cover exactly one
+            courier before anything can be created. Waves never mix carriers.</span></div>
+        </div>
+      </article>
+
+      <article class="stage">
+        <div class="stage-n">7</div>
+        <div class="stage-body">
+          <h3>Select only the rows worth a trip</h3>
+          <p>Cross-floor rows are dropped and reported. Rows under their size threshold are held for the next cycle.
+            What remains is ticked, the selection count is verified against the table, and the wave is created.</p>
+          <div class="gate"><span class="k">HAND BACK</span><span>The courier tree is reset afterwards, so the next
+            person to open the page is not handed a narrow scope the bot left behind.</span></div>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">03</span>Priority and timing</h2>
+    <p class="col">Twelve channels in a fixed order. The timing column is what makes a channel eligible — reaching it
+      is not enough on its own, the wave sizing rules in section 04 still apply.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Truck times come from each channel's own name prefix: Shopee 16:01, Lazada 13:01, TikTok 14:01.</caption>
+        <thead>
+          <tr>
+            <th class="num">#</th>
+            <th>Channel</th>
+            <th>When it may act</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="top">
+            <td class="rank">1</td>
+            <td>Shopee-TH-Express Delivery (SPX)</td>
+            <td>Morning: wait for 10 orders. From 13:00: any quantity<span class="why">the afternoon rule overrides the batch</span></td>
+          </tr>
+          <tr class="top">
+            <td class="rank">2</td>
+            <td>Shopee-TH-Instant Delivery — ส่งทันที (แพ็ก 2 ชั่วโมง)</td>
+            <td>Runs to 11:45, pauses, resumes 13:00<span class="why">two-hour SLA, so it never waits on a truck</span></td>
+          </tr>
+          <tr class="top">
+            <td class="rank">3</td>
+            <td>Shopee-TH-Express Delivery (SHP Food)</td>
+            <td>Same as #1</td>
+          </tr>
+          <tr>
+            <td class="rank">4</td>
+            <td>TikTok-TH-BEST Express + Shopee-TH-DHL Domestic</td>
+            <td class="num">14:01<span class="why">the only pair allowed to share a wave — both take the earlier of their two truck times</span></td>
+          </tr>
+          <tr><td class="rank">5</td><td>Lazada-TH-LEX TH</td><td class="num">13:01</td></tr>
+          <tr><td class="rank">6</td><td>Shopee-TH-SPX Express</td><td class="num">16:01</td></tr>
+          <tr><td class="rank">7</td><td>TikTok-TH-J&amp;T Express</td><td class="num">14:01</td></tr>
+          <tr><td class="rank">8</td><td>TikTok-TH-Flash Express Thailand</td><td class="num">14:01</td></tr>
+          <tr><td class="rank">9</td><td>Lazada-TH-Flash Express</td><td class="num">13:01</td></tr>
+          <tr><td class="rank">10</td><td>SPX Express(TH)</td><td class="num">16:01<span class="why">inferred — the label carries no platform prefix</span></td></tr>
+          <tr><td class="rank">11</td><td>TikTok-TH-KEX Express Thailand</td><td class="num">14:01</td></tr>
+          <tr><td class="rank">12</td><td>Shopee-TH-Flash Express Bulky</td><td class="num">16:01</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">04</span>What makes a wave worth creating</h2>
+    <p class="col">A wave is one picking trip to one floor. <strong>FANTECH is floor 5, Ugreen is floor 3</strong> —
+      the zone label <span class="m">3FL Ugreen</span> says so outright. That single fact sets every rule here.</p>
+
+    <div class="rules">
+      <div class="rule">
+        <span class="k">SINGLE-SKU ROW</span>
+        <span class="v">50 parcels</span>
+        <p>Grab-and-pack, so one round clears many.</p>
+      </div>
+      <div class="rule">
+        <span class="k">MULTI-SKU ROW</span>
+        <span class="v">20 parcels</span>
+        <p>Picked and sorted per order — the same round holds far fewer.</p>
+      </div>
+      <div class="rule">
+        <span class="k">SHORT LOAD</span>
+        <span class="v">30 minutes</span>
+        <p>Collected per courier, then sent as one batch rather than a wave per order.</p>
+      </div>
+    </div>
+
+    <div class="evidence col">
+      <p class="fig">Live wave, 11 Sep: 2 · 1 · 24 · 2 · 2 parcels</p>
+      <p>Five separate trips for 31 parcels — four of them climbing a floor for one or two items. That run is why
+        the thresholds above exist. Under the current rules the same queue produces one trip, not five.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">05</span>What it will never do</h2>
+    <ul class="never col">
+      <li>
+        <span class="k">RESERVED</span>
+        <p>Touch a <span class="m">LockStock</span> order. Those are reservations held for a named customer, excluded
+          before the decision, again at classification, and once more immediately before the click.</p>
+      </li>
+      <li>
+        <span class="k">WRONG STOCK</span>
+        <p>Confirm an order outside <span class="m">STOCK_5</span>. Anything else needs a human to move goods first —
+          and the engine never moves stock itself.</p>
+      </li>
+      <li>
+        <span class="k">CROSS-FLOOR</span>
+        <p>Put a cross-floor row in a wave. Filling one means a picker walking between floors 5 and 3 for a single
+          order, so those rows are reported and left alone.</p>
+      </li>
+      <li>
+        <span class="k">MIXED</span>
+        <p>Create a wave covering more than one courier, or confirm the same order twice in a cycle.</p>
+      </li>
+      <li>
+        <span class="k">SELF-ENABLE</span>
+        <p>Turn on its own live actions. Every priority is off until named explicitly, one at a time.</p>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">06</span>How far it is actually proven</h2>
+    <div class="status">
+      <div class="stack done">
+        <h3>Verified against the live site</h3>
+        <ul>
+          <li><span class="tick">✓</span><span>Queue scan, pagination and completeness checking</span></li>
+          <li><span class="tick">✓</span><span>Reservation exclusion and the STOCK_5 guard</span></li>
+          <li><span class="tick">✓</span><span>Order confirmation — 8 orders confirmed for real</span></li>
+          <li><span class="tick">✓</span><span>Wave page: scope, preview, row reading, cross-floor detection, row selection</span></li>
+          <li><span class="tick">✓</span><span>One complete wave created end to end</span></li>
+        </ul>
+      </div>
+      <div class="stack todo">
+        <h3>Built and unit-tested, not yet run live</h3>
+        <ul>
+          <li><span class="tick">•</span><span>The twelve-channel order and its per-channel timing</span></li>
+          <li><span class="tick">•</span><span>Wave sizing: 50 / 20 parcels and the 30-minute window</span></li>
+          <li><span class="tick">•</span><span>Waving the couriers that were actually confirmed</span></li>
+          <li><span class="tick">•</span><span>The duplicate-scan fix behind the double-confirm incident</span></li>
+          <li><span class="tick">•</span><span>Longer confirmation verification, replacing an 8-second window that reported real confirmations as failures</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="col">
+    <h2><span class="n">07</span>Open decisions</h2>
+    <p>Four things are waiting on an operational answer rather than on code.</p>
+    <ul class="never">
+      <li><span class="k">TIME FILTER</span><p>BigSeller's <span class="m">เลือกเวลา</span> filter is left as found, so a
+        wave can sweep in older confirmed orders. Pinning it to <span class="m">วันนี้</span> is cleaner but risks
+        stranding yesterday's leftovers where nobody sees them.</p></li>
+      <li><span class="k">UNRANKED</span><p>Three couriers exist in BigSeller with no priority assigned:
+        <span class="m">SPX Express - ผู้ซื้อรับที่จุดบริการ</span>, <span class="m">Lazada-TH-Flash TH Bulky</span>,
+        <span class="m">Shopee-TH-Best Express Bulky</span>. They route to manual review, which is safe but unattended.</p></li>
+      <li><span class="k">SHARED WAVE</span><p>BEST Express and DHL Domestic are approved to share a wave, but the
+        code still waves them separately and neither has had a real order to test with.</p></li>
+      <li><span class="k">NO DATE</span><p>Urgent walk-in Seller Delivery cannot be automated from the list view —
+        the <span class="m">กำหนดส่ง</span> date is not in it, so those orders always go to manual review.</p></li>
+    </ul>
+  </section>
+
+  <footer>
+    Figures in this report come from live runs on 10–11 September 2026. Order and customer identifiers are
+    deliberately omitted. The engine writes one audit line per order to <span class="m">logs/wave-engine-YYYY-MM-DD.jsonl</span>,
+    which is where any individual decision can be traced.
+  </footer>
+
+</div>

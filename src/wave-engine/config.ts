@@ -38,6 +38,13 @@ export interface WaveEngineConfig {
   /** Store whose orders are stock RESERVATIONS (ของจอง), not shipments — excluded from every action. */
   reservedStore: string;
   /**
+   * The only platforms this engine may act on ("ที่วงไว้ร้านอื่น ห้ามแตะ",
+   * 2026-09-11). Everything else on BigSeller's platform filter —
+   * คำสั่งซื้อด้วยตนเอง, WooCommerce, POS, ทางแชท — belongs to another process
+   * and is skipped outright.
+   */
+  allowedPlatforms: string[];
+  /**
    * Per wave-type thresholds, because picking effort differs
    * ("คู่ 20 ออเดอร์ เดียว 50 ออเดอร์", 2026-09-11): a single-SKU parcel is
    * grab-and-pack so 50 fit in one trip, while a multi-SKU parcel needs
@@ -150,6 +157,10 @@ export function loadWaveEngineConfig(env: NodeJS.ProcessEnv = process.env): Wave
     // same underlying reason (its orders are reservations priced at THB 0, not
     // real shipments).
     reservedStore: env.WAVE_ENGINE_RESERVED_STORE ?? 'LockStock',
+    allowedPlatforms: (env.WAVE_ENGINE_ALLOWED_PLATFORMS ?? 'Shopee,Lazada,TikTok')
+      .split(',')
+      .map((name) => name.trim())
+      .filter((name) => name !== ''),
     minParcelsSingleType: Number(env.WAVE_ENGINE_MIN_PARCELS_SINGLE ?? 50),
     minParcelsMultiType: Number(env.WAVE_ENGINE_MIN_PARCELS_MULTI ?? 20),
     waveIntervalMinutes: Number(env.WAVE_ENGINE_WAVE_INTERVAL_MINUTES ?? 30),

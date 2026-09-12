@@ -48,6 +48,7 @@ Never commit `.env`, `secrets/`, or `playwright/.auth/`. They are gitignored; ke
 | `npm run wave-engine -- --board` | The queue right now, in priority order, plus each platform's truck time | No — 2 seconds, read only |
 | `npm run wave-engine -- --wave-dry-run` | What is waveable per carrier, split into "ready" vs "left for a human" | No |
 | `npm run wave-engine -- --dump` | Raw order rows next to what the parser made of them | No |
+| `npm run wave-engine -- --zones` | Which FLOOR each channel's orders pick from, and which orders span both | No — ~4 min |
 | `npm run wave-engine -- --once` | One full cycle: scan, decide, log | Only if live priorities are set |
 | `npm run wave-engine -- --fast` | Same, but acts on the single highest-priority carrier — ~20s instead of ~2 min | Only if live priorities are set |
 | `npm run wave-engine` | Daemon: urgent loop every ~3 min, main loop every ~12 min | Only if live priorities are set |
@@ -57,7 +58,32 @@ because BigSeller already counts the queue for you.
 
 ---
 
+**One engine at a time.** Anything that can click takes a lock (`logs/wave-engine.lock`) and
+refuses to start while another such run is alive. Two engines on one account scan the same
+queue, reset each other's filters mid-read, and can confirm the same order twice. Read-only
+modes (`--board`, `--zones`, `--wave-dry-run`, `--dump`) skip the lock — they are safe to run
+while the engine works.
+
+**Every cycle starts from a clean page.** BigSeller remembers filters across page loads, so
+reloading the URL is not a fresh start: whatever the last run or the last person left selected
+is still applied. Each cycle resets all four filter rows to ทั้งหมด and reads the selection
+back to confirm it moved. Skipping this is what made a live run on 2026-09-12 read 69 orders
+out of 508 and abandon itself.
+
+---
+
 ## 4. The rules it follows
+
+**Platforms.** The engine only ever acts on orders from **Shopee, Lazada and TikTok**. Manual
+orders (`คำสั่งซื้อด้วยตนเอง`), WooCommerce, POS and chat orders belong to a different process
+and are excluded before anything else is considered — this guard sits outside every other rule,
+so a blocked order is skipped even when its tier, timing and stock all check out. The list is
+`WAVE_ENGINE_ALLOWED_PLATFORMS`.
+
+**Oldest first.** Within one priority, the order that came in first is acted on first. This is
+what makes the 13:00 restart correct for ส่งทันที: the backlog that piled up before the 11:45
+stop has already burned part of its 2-hour SLA, so it clears before anything newer. An order
+whose timestamp cannot be read sorts to the back of its priority rather than being dropped.
 
 **Priority order** (1 = most urgent) lives in `src/wave-engine/channel-policy.ts`:
 
@@ -83,6 +109,10 @@ a picker walking between floors. They are logged for a human every time.
 
 ## 5. What it will never do
 
+- **Touch an order from outside Shopee / Lazada / TikTok.** The exclusion list is built from
+  the platform filter's own counts and is read *exactly* — no tolerance. If a single row of it
+  cannot be read, the cycle is abandoned, because an order missing from an exclusion list is an
+  order that looks eligible.
 - **Touch a `LockStock` order.** Those are stock reservations a salesperson is holding for a
   customer, not shipments. Excluded before any decision, again at classification, and once
   more immediately before the click. If that exclusion list cannot be read, the whole cycle
@@ -106,7 +136,7 @@ a picker walking between floors. They are logged for a human every time.
   batching window measures from.
 
 ```bash
-npm run test:unit     # 141 unit tests, no browser needed
+npm run test:unit     # 157 unit tests, no browser needed
 npx tsc --noEmit
 ```
 
@@ -114,8 +144,13 @@ npx tsc --noEmit
 
 ## 7. Known gaps (as of 2026-09-11)
 
-- **Not yet verified live**: the 12-channel priorities, the per-type wave thresholds, and the
-  30-minute batching all pass unit tests but have not run a full day against the real site.
+- **Not yet verified live**: the 12-channel priorities, the per-type wave thresholds, the
+  30-minute batching, the platform allowlist and the oldest-first ordering all pass unit tests
+  but have not run a full day against the real site.
+- **Orders touched before the platform guard existed (before 2026-09-11)** were never filtered
+  by platform. On that day the `คำสั่งซื้อด้วยตนเอง` group held 79 orders, roughly 60 of them
+  LockStock reservations already excluded — the other ~19 were inside the engine's reach. The
+  hole is closed; the history has not been audited.
 - **`เลือกเวลา` is not pinned.** The engine leaves BigSeller's time filter as it found it, so a
   wave can include older confirmed orders. Decide `วันนี้` vs `ทั้งหมด` and pin it.
 - **Three couriers have no priority yet**: `SPX Express - ผู้ซื้อรับที่จุดบริการ`,

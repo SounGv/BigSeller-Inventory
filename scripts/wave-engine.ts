@@ -12,6 +12,8 @@ import { DecisionLog } from '../src/wave-engine/decision-log.js';
 import { startScheduler } from '../src/wave-engine/scheduler.js';
 import { runCycle, runFastCycle, toDomainOrder } from '../src/wave-engine/wave-engine-service.js';
 import { bangkokHhMm, classifyOrder, resolveLogisticsChannel } from '../src/wave-engine/tiers.js';
+import { floorsForOrder, loadSkuFloors } from '../src/wave-engine/sku-floor.js';
+import { acquireRunLock } from '../src/wave-engine/run-lock.js';
 
 /**
  * BigSeller-WaveEngine phase 1 (see BigSeller-WaveEngine/TASK-BigSeller-WaveEngine-phase1.md).
@@ -39,13 +41,15 @@ async function main(): Promise<void> {
   const waveDryRun = args.includes('--wave-dry-run');
   const board = args.includes('--board');
   const fast = args.includes('--fast');
+  const zones = args.includes('--zones');
   const dumpLimit = Number(args.find((arg) => /^\d+$/.test(arg)) ?? 5);
 
   const config = loadWaveEngineConfig();
   assertStorageStateExists();
 
+  const mode = zones ? 'zones' : board ? 'board' : waveDryRun ? 'wave-dry-run' : dump ? 'dump' : fast ? 'fast' : once ? 'once' : 'daemon';
   await logger.info(
-    `wave-engine: starting (mode=${dump ? 'dump' : once ? 'once' : 'daemon'}) ` +
+    `wave-engine: starting (mode=${mode}) ` +
       `live_priorities=${[...config.livePriorities].join(',') || 'none (full dry run)'} urgent=${config.urgentLoopMinutes}min main=${config.mainLoopMinutes}min ` +
       `jitter=±${config.jitterSeconds}s channels=${Object.keys(config.channelPolicies).length} ` +
       `eod=${config.endOfDaySweepTime ?? 'unset'}`,
@@ -58,6 +62,11 @@ async function main(): Promise<void> {
   } else {
     await logger.info('wave-engine: full dry run — every decision is logged, nothing is clicked');
   }
+
+  // Read-only modes are safe to run beside a working engine; anything that can
+  // click is not.
+  const readOnly = board || waveDryRun || dump || zones;
+  const releaseLock = readOnly ? () => undefined : await acquireRunLock(mode);
 
   const headless = (process.env.BIGSELLER_HEADLESS ?? 'false').toLowerCase() === 'true';
   // Runs unattended for hours, so Chrome's own permission bubble ("wants to
@@ -79,6 +88,11 @@ async function main(): Promise<void> {
 
     if (waveDryRun) {
       await inspectWavePage(page, config);
+      return;
+    }
+
+    if (zones) {
+      await printZonePlan(page, config);
       return;
     }
 
@@ -107,6 +121,7 @@ async function main(): Promise<void> {
   } finally {
     await context.close().catch(() => undefined);
     await browser.close().catch(() => undefined);
+    releaseLock();
   }
 }
 
@@ -144,6 +159,128 @@ function platformCutoffOf(platformLabel: string): string | undefined {
   return undefined;
 }
 
+/**
+ * `--zones`: which FLOOR this morning's queue has to be picked from.
+ *
+ * Read-only. The order list never shows a zone — that only appears on the wave
+ * page, and only AFTER an order is confirmed, which is too late to plan a
+ * morning with. But the list does carry SKU codes, and this repo already syncs
+ * every SKU's storage position, so the floor can be worked out before anything
+ * is confirmed.
+ *
+ * Orders needing more than one floor are the expensive ones: that is a picker
+ * walking between floor 3 and floor 5 for a single parcel, which is exactly
+ * what the no-cross-zone rule exists to prevent.
+ */
+async function printZonePlan(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
+  const skuFloors = await loadSkuFloors(process.env.SHEET_LOCATION_CURRENT ?? 'DB_LOCATION_CURRENT');
+
+  await ensureSessionValid(page, NEW_ORDERS_URL);
+  const priorityPage = new BigSellerOrderPriorityPage(page);
+  await priorityPage.goto();
+
+  // Same exclusions as a real cycle: a reservation is not work, and an order
+  // from a platform this engine may not touch is not work either. Counting
+  // them would overstate the morning.
+  const reserved = await priorityPage.collectStoreOrderIds(config.reservedStore);
+  const blockedPlatform = await priorityPage.collectBlockedPlatformOrderIds(config.allowedPlatforms);
+
+  await priorityPage.selectWarehouses([config.pickingWarehouse]);
+  const expectedCount = (await priorityPage.readWarehouseOptions()).find((o) => o.name === config.pickingWarehouse)?.count;
+  const rows = await priorityPage.scanOrders({
+    depth: 'full',
+    warehouseScope: config.pickingWarehouse,
+    expectedCount,
+  });
+  await priorityPage.selectWarehouses('all');
+
+  // A plan built on an empty read is worse than no plan: it says "nothing to
+  // do" on the busiest morning of the week. Seen live 2026-09-12 when a filter
+  // reset silently failed and left the page showing 68 manual orders.
+  if (rows.length === 0) {
+    throw new Error(
+      `Read 0 orders in ${config.pickingWarehouse} while the filter reports ${expectedCount ?? 'an unknown number'} — ` +
+        'refusing to report an empty morning. Check that no filter is left applied on the order page.',
+    );
+  }
+
+  const byChannel = new Map<string, { floor: Map<string, number>; mixed: number; blocked: number; unknown: number }>();
+  let totals = { counted: 0, mixed: 0, blocked: 0, unknown: 0 };
+  const floorTotals = new Map<string, number>();
+  const unknownSkus = new Map<string, number>();
+  const blockedSkus = new Map<string, number>();
+
+  for (const row of rows) {
+    if (reserved.has(row.orderId) || blockedPlatform.has(row.orderId)) continue;
+    const channel = resolveLogisticsChannel(row.rawShippingCell, config) || '(ไม่รู้จัก)';
+    const entry = byChannel.get(channel) ?? { floor: new Map<string, number>(), mixed: 0, blocked: 0, unknown: 0 };
+    const found = floorsForOrder(row.productCell, skuFloors);
+    totals.counted++;
+
+    for (const item of found.blocked) blockedSkus.set(item.sku, (blockedSkus.get(item.sku) ?? 0) + 1);
+    for (const sku of found.unknown) unknownSkus.set(sku, (unknownSkus.get(sku) ?? 0) + 1);
+
+    if (found.floors.length > 1) {
+      entry.mixed++;
+      totals.mixed++;
+    } else if (found.floors.length === 1) {
+      const floor = found.floors[0];
+      entry.floor.set(floor, (entry.floor.get(floor) ?? 0) + 1);
+      floorTotals.set(floor, (floorTotals.get(floor) ?? 0) + 1);
+    } else if (found.blocked.length > 0) {
+      entry.blocked++;
+      totals.blocked++;
+    } else {
+      entry.unknown++;
+      totals.unknown++;
+    }
+    byChannel.set(channel, entry);
+  }
+
+  const ranked = [...byChannel.entries()]
+    .map(([channel, entry]) => ({ channel, entry, priority: config.channelPolicies[channel]?.priority }))
+    .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+
+  const lines = [
+    '',
+    `=== งานเช้านี้ แยกตามชั้นที่ต้องขึ้นไปหยิบ (${config.pickingWarehouse}, ${totals.counted} ใบ) ===`,
+    ...ranked.map(({ channel, entry, priority }) => {
+      const floors = [...entry.floor.entries()].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${n}`).join(' · ');
+      const extras = [
+        entry.mixed > 0 ? `ข้ามชั้น ${entry.mixed}` : '',
+        entry.blocked > 0 ? `ยังไม่เข้าชั้น ${entry.blocked}` : '',
+        entry.unknown > 0 ? `ไม่รู้ตำแหน่ง ${entry.unknown}` : '',
+      ].filter(Boolean).join(' · ');
+      const rank = priority === undefined ? ' -' : ` ${priority}`;
+      return `  ลำดับ${rank}  ${channel}
+           ${floors || '(ไม่มีใบที่อยู่ชั้นเดียว)'}${extras ? `   ⚠ ${extras}` : ''}`;
+    }),
+    '',
+    '=== รวมทั้งคลัง ===',
+    ...[...floorTotals.entries()].sort((a, b) => b[1] - a[1]).map(([f, n]) => `  ${String(n).padStart(5)} ใบ   ${f}`),
+    `  ${String(totals.mixed).padStart(5)} ใบ   ข้ามชั้น — หยิบรวมใน Wave เดียวไม่ได้ ต้องให้คนจัด`,
+    `  ${String(totals.blocked).padStart(5)} ใบ   ของยังไม่เข้าชั้นหยิบ — ต้องย้ายมาก่อน`,
+    `  ${String(totals.unknown).padStart(5)} ใบ   ไม่รู้ตำแหน่ง — ไม่มี SKU นี้ในตารางตำแหน่งจัดเก็บ`,
+    '',
+  ];
+
+  if (unknownSkus.size > 0) {
+    lines.push(
+      `=== SKU ที่ไม่มีในตารางตำแหน่ง (${unknownSkus.size} รายการ, แสดง 15 อันดับแรก) ===`,
+      ...[...unknownSkus.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([sku, n]) => `  ${String(n).padStart(4)} ใบ   ${sku}`),
+      '',
+    );
+  }
+  if (blockedSkus.size > 0) {
+    lines.push(
+      `=== SKU ที่ของยังไม่เข้าชั้นหยิบ (${blockedSkus.size} รายการ, แสดง 15 อันดับแรก) ===`,
+      ...[...blockedSkus.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([sku, n]) => `  ${String(n).padStart(4)} ใบ   ${sku}`),
+      '',
+    );
+  }
+  console.log(lines.join('\n'));
+}
+
 async function printPriorityBoard(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
   await ensureSessionValid(page, NEW_ORDERS_URL);
   const priorityPage = new BigSellerOrderPriorityPage(page);
@@ -165,6 +302,18 @@ async function printPriorityBoard(page: Page, config: ReturnType<typeof loadWave
   const reserved = stores.find((store) => store.label === config.reservedStore)?.count ?? 0;
   const realCount = (pill: { label: string; count: number | undefined }) =>
     pill.label.includes(SELLER_DELIVERY_CHANNEL) ? Math.max(0, (pill.count ?? 0) - reserved) : (pill.count ?? 0);
+
+  // Orders from platforms outside the allowlist are not this engine's work at
+  // all, so the board must not present them as a job waiting to be done.
+  // Their overlap with the reserved store cannot be derived from filter counts
+  // (the two filters are independent), so the workload is reported as a range
+  // rather than a single invented number.
+  const isAllowedPlatform = (label: string) =>
+    config.allowedPlatforms.some((allowed) => label.toLowerCase().includes(allowed.toLowerCase()));
+  const blockedPlatforms = platforms.filter(
+    (pill) => pill.label !== 'ทั้งหมด' && (pill.count ?? 0) > 0 && !isAllowedPlatform(pill.label),
+  );
+  const blockedPlatformTotal = blockedPlatforms.reduce((sum, pill) => sum + (pill.count ?? 0), 0);
 
   const waiting = logistics.filter((pill) => realCount(pill) > 0);
   const ranked = waiting
@@ -198,12 +347,32 @@ async function printPriorityBoard(page: Page, config: ReturnType<typeof loadWave
     ...warehouses
       .filter((option) => option.name !== config.pickingWarehouse && option.count > 0)
       .map((option) => `  อยู่คลัง ${option.name}: ${option.count} ใบ << ต้องย้ายของมา ${config.pickingWarehouse} ก่อน`),
-    `  งานจริงใน ${config.pickingWarehouse}: ${Math.max(0, (warehouses.find((o) => o.name === config.pickingWarehouse)?.count ?? 0) - reserved)} ใบ (หักของจองแล้ว)`,
+    ...(blockedPlatformTotal > 0
+      ? [
+          `  นอกช่องทางหลัก: ${blockedPlatformTotal} ใบ (${blockedPlatforms.map((pill) => pill.label).join(', ')}) — ไม่แตะ`,
+        ]
+      : []),
+    ...(() => {
+      const stockCount = warehouses.find((o) => o.name === config.pickingWarehouse)?.count ?? 0;
+      // Upper bound assumes every reservation is already inside the blocked
+      // platforms; the lower bound assumes none is. The truth is somewhere in
+      // between and the filter counts cannot say where.
+      const high = Math.max(0, stockCount - Math.max(reserved, blockedPlatformTotal));
+      const low = Math.max(0, stockCount - reserved - blockedPlatformTotal);
+      if (low === high) return [`  งานจริงใน ${config.pickingWarehouse}: ${high} ใบ (หักของจองและช่องทางนอกหลักแล้ว)`];
+      return [
+        `  งานจริงใน ${config.pickingWarehouse}: ${low}-${high} ใบ (หักของจองและช่องทางนอกหลักแล้ว — ` +
+          'ของจองบางใบอยู่ในช่องทางนอกหลักอยู่แล้ว หน้านี้บอกไม่ได้ว่าซ้ำกันกี่ใบ)',
+      ];
+    })(),
     '',
     `=== แพลตฟอร์ม / เวลารถ (ตอนนี้ ${nowHhMm}) ===`,
     ...platforms
       .filter((pill) => (pill.count ?? 0) > 0)
       .map((pill) => {
+        if (!isAllowedPlatform(pill.label)) {
+          return `  ${String(pill.count).padStart(4)} ใบ   ${pill.label}   << ไม่แตะ (นอกช่องทางหลัก)`;
+        }
         const cutoff = platformCutoffOf(pill.label);
         if (!cutoff) return `  ${String(pill.count).padStart(4)} ใบ   ${pill.label}   (ไม่มีเวลารถ)`;
         return (
@@ -258,7 +427,9 @@ async function inspectWavePage(page: Page, config: ReturnType<typeof loadWaveEng
     await wavePage.setLogisticsScope([{ title: carrier.title, group: carrier.group }]);
     const scoped = await wavePage.readSummary();
     if (scoped.parcels === 0) continue;
-    const line = `${String(scoped.parcels).padStart(4)} พัสดุ / ${scoped.items} ชิ้น   ${carrier.title}`;
+    const line =
+      `${String(scoped.parcels).padStart(4)} พัสดุ / ${String(scoped.skuTypes).padStart(3)} ประเภท SKU / ` +
+      `${String(scoped.items).padStart(4)} ชิ้น   ${carrier.title}`;
     (scoped.parcels >= config.minParcelsMultiType ? forBot : forHumans).push(line);
   }
   await wavePage.setLogisticsScope([{ title: tree[0].title }]);

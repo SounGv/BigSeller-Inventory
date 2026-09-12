@@ -218,10 +218,16 @@ export async function readWarehouseFilterOptions(page: Page): Promise<WarehouseF
     .evaluateAll((labels) =>
       labels.map((label) => {
         const text = (label.textContent ?? '').replace(/\s+/g, ' ').trim();
-        const match = text.match(/^(.*?)\s*\((\d+)\)$/);
+        // BigSeller prints a thousands separator once a warehouse passes 999
+        // ("STOCK_5 (1,547)"). A digits-only pattern silently failed to match
+        // there, which left the count at 0 AND kept the separator inside the
+        // name — so on 2026-09-12 the board reported "0 orders" for a warehouse
+        // holding over 1,500, and setWarehouseFilter could no longer find
+        // "STOCK_5" at all.
+        const match = text.match(/^(.*?)\s*\(([\d,]+)\)$/);
         return {
           name: (match ? match[1] : text).trim(),
-          count: match ? Number(match[2]) : 0,
+          count: match ? Number(match[2].replace(/,/g, '')) : 0,
           checked: label.className.includes('ant-checkbox-wrapper-checked'),
         };
       }),
@@ -392,7 +398,18 @@ export async function selectFilterPill(page: Page, rowLabel: string, pillLabel: 
       await clickThroughGuide(page, filterRow.locator('span.ship_item', { hasText: pillLabel }).first(), { timeout: 3000 });
       await waitForListSettled(page);
       await dismissOrderPageOverlays(page);
-      return;
+      // Read the selection back. A click that Playwright reports as successful
+      // is NOT proof the filter moved — a toast can sit over the pill and eat
+      // it. Confirmed live 2026-09-12: a reset to ทั้งหมด reported success
+      // while the platform row stayed on คำสั่งซื้อด้วยตนเอง, so the next scan
+      // saw 68 orders instead of 1,600 and reported an empty morning.
+      const active = (await readFilterPills(page, rowLabel)).find((pill) => pill.active);
+      if (active && active.label === pillLabel) return;
+      lastError = new Error(
+        `clicked "${pillLabel}" but the "${rowLabel}" row now reads "${active?.label ?? '(nothing active)'}"`,
+      );
+      await humanDelay(300, 700);
+      continue;
     } catch (error) {
       lastError = error;
       await humanDelay(300, 700);

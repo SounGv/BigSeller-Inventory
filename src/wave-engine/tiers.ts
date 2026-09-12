@@ -26,6 +26,10 @@ export interface ScannedOrder {
   warehouse: string;
   /** True when the order belongs to the reserved-stock store (ของจอง). Determined by store-filter membership, not by reading the row. */
   isReserved: boolean;
+  /** True when the order came from a platform this engine is not allowed to act on. Determined by platform-filter membership. */
+  isBlockedPlatform: boolean;
+  /** Milliseconds since epoch for the order's เวลา cell, or null when unreadable. Oldest acts first within a priority. */
+  orderTime: number | null;
 }
 
 export interface DecisionContext {
@@ -77,8 +81,25 @@ export function bangkokHhMm(now: Date): string {
  * Returns '' when nothing matches, which the caller must treat as manual-review
  * (spec §7), never as a default tier.
  */
+/**
+ * Courier names that CONTAIN a ranked channel's name but are a different job.
+ *
+ * "Shopee-TH-SPX Express - ผู้ซื้อรับที่จุดบริการ SPX" contains
+ * "Shopee-TH-SPX Express" word for word, so plain containment handed it
+ * priority 6 and would have confirmed and waved it as an ordinary SPX parcel.
+ * It is not one — the buyer collects it from a service point — and it was
+ * named on 2026-09-11 as a courier with no priority yet. Seen live in the
+ * queue on 2026-09-12.
+ *
+ * A marker here means "never inherit a rank from the name you sit inside":
+ * the order falls to manual review, which is the safe outcome for a courier
+ * nobody has ranked.
+ */
+const UNRANKED_VARIANT_MARKERS = ['ผู้ซื้อรับที่จุดบริการ'];
+
 export function resolveLogisticsChannel(rawShippingCell: string, config: WaveEngineConfig): string {
   const haystack = rawShippingCell.toLowerCase();
+  if (UNRANKED_VARIANT_MARKERS.some((marker) => haystack.includes(marker.toLowerCase()))) return '';
   const labels = [SELLER_DELIVERY_CHANNEL, ...Object.keys(config.channelPolicies)].sort((a, b) => b.length - a.length);
   return labels.find((label) => haystack.includes(label.toLowerCase())) ?? '';
 }
@@ -129,7 +150,34 @@ function formatDateParts(year: number, month: number, day: number): string {
  * executor's call (phase 1: tier 1 only, and only behind ENABLE_LIVE_TIER1).
  */
 export function classifyOrder(order: ScannedOrder, config: WaveEngineConfig, ctx: DecisionContext): Decision {
-  return applyReservedStoreGuard(order, applyWarehouseGuard(order, classifyByTier(order, config, ctx), config), config);
+  return applyPlatformGuard(
+    order,
+    applyReservedStoreGuard(order, applyWarehouseGuard(order, classifyByTier(order, config, ctx), config), config),
+    config,
+  );
+}
+
+/**
+ * Only the marketplace platforms may be acted on — Shopee, Lazada and TikTok
+ * ("ที่วงไว้ร้านอื่น ห้ามแตะ", 2026-09-11). Everything else on the platform
+ * filter (คำสั่งซื้อด้วยตนเอง, WooCommerce, POS, ทางแชท) is somebody else's
+ * process.
+ *
+ * This matters beyond the reserved store: on 2026-09-11 the queue held 79
+ * manual orders while only ~60 of them were LockStock reservations, so ~19
+ * were already inside the engine's reach with nothing stopping it.
+ *
+ * Applied LAST, so it overrides every other outcome including `skip` — the
+ * platform decides whether this engine has any business with the order at
+ * all.
+ */
+function applyPlatformGuard(order: ScannedOrder, decision: Decision, config: WaveEngineConfig): Decision {
+  if (!order.isBlockedPlatform) return decision;
+  return {
+    ...decision,
+    action: 'skip',
+    reason: `EXCLUDED_PLATFORM: not one of ${config.allowedPlatforms.join(' / ')} — this engine only handles marketplace orders`,
+  };
 }
 
 /**
@@ -380,11 +428,19 @@ function classifySellerDelivery(
  * precisely backwards. Unclassified rows (tier null) sort last; they are never
  * confirmed anyway.
  */
-export function sortByPriority<T extends { decision: Decision }>(items: T[]): T[] {
+export function sortByPriority<T extends { decision: Decision; order?: ScannedOrder }>(items: T[]): T[] {
   return [...items].sort((a, b) => {
     const tierOf = (decision: Decision) => decision.tier ?? Number.POSITIVE_INFINITY;
     if (tierOf(a.decision) !== tierOf(b.decision)) return tierOf(a.decision) - tierOf(b.decision);
-    return Number(b.decision.priorityBoost) - Number(a.decision.priorityBoost);
+    if (a.decision.priorityBoost !== b.decision.priorityBoost) {
+      return Number(b.decision.priorityBoost) - Number(a.decision.priorityBoost);
+    }
+    // Oldest order first ("เวลาออเดอร์ที่มาก่อน"): within a priority the order
+    // that has been waiting longest is also the one closest to its deadline,
+    // which is what the 2-hour channel needs. Orders with no readable
+    // timestamp sort last rather than jumping the queue on a parse failure.
+    const timeOf = (item: T) => item.order?.orderTime ?? Number.POSITIVE_INFINITY;
+    return timeOf(a) - timeOf(b);
   });
 }
 

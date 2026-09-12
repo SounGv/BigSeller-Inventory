@@ -3,6 +3,7 @@ import { BigSellerGenerateWavePage } from '../bigseller/generate-wave-page.js';
 import { readFilterPills } from '../bigseller/new-orders-dom.js';
 import { assertScanIsComplete, BigSellerOrderPriorityPage, type ScannedOrderRow } from '../bigseller/order-priority-page.js';
 import { logger } from '../utils/logger.js';
+import { parseThaiDateTime } from '../utils/thai-date.js';
 import { SELLER_DELIVERY_CHANNEL, type WaveEngineConfig } from './config.js';
 import { DecisionLog, type LoopName } from './decision-log.js';
 import { minParcelsForWaveType, readWaveState, recordWaveCreated, shouldWaveNow } from './wave-state.js';
@@ -83,8 +84,16 @@ export async function runCycle(
     throw error;
   });
 
+  // Platforms outside the allowed list are somebody else's process entirely.
+  const blockedPlatformOrderIds = await priorityPage
+    .collectBlockedPlatformOrderIds(config.allowedPlatforms)
+    .catch(async (error: Error) => {
+      await logger.error(`wave-engine [${loop}]: could not read the platform exclusion list — ${error.message}`);
+      throw error;
+    });
+
   const rows = loop === 'urgent' ? await scanUrgentChannels(priorityPage, config) : await scanEverything(priorityPage, config);
-  const orders = rows.map((row) => toDomainOrder(row, config, reservedOrderIds));
+  const orders = rows.map((row) => toDomainOrder(row, config, reservedOrderIds, blockedPlatformOrderIds));
 
   const channelPendingCounts = countByChannel(orders);
   const classified: OrderDecision[] = orders.map((order) => ({
@@ -218,7 +227,9 @@ export async function runFastCycle(
 
   const rows = await priorityPage.scanOrders({ depth: 'light', warehouseScope: config.pickingWarehouse });
   const now = new Date();
-  const scopedOrders = rows.map((row) => toDomainOrder(row, config, reservedOrderIds));
+  const blockedPlatformOrderIds = await priorityPage.collectBlockedPlatformOrderIds(config.allowedPlatforms);
+  if (blockedPlatformOrderIds.size > 0) await priorityPage.selectLogisticsFilter(target.pill.label);
+  const scopedOrders = rows.map((row) => toDomainOrder(row, config, reservedOrderIds, blockedPlatformOrderIds));
   // The batch-of-N morning rule counts orders waiting in that channel. This
   // scan is already filtered to one courier, so its own rows ARE that count.
   const channelPendingCounts = countByChannel(scopedOrders);
@@ -399,6 +410,7 @@ export function toDomainOrder(
   row: ScannedOrderRow,
   config: WaveEngineConfig,
   reservedOrderIds: ReadonlySet<string> = new Set(),
+  blockedPlatformOrderIds: ReadonlySet<string> = new Set(),
 ): ScannedOrder {
   return {
     orderId: row.orderId,
@@ -409,7 +421,23 @@ export function toDomainOrder(
     deliveryDate: parseDeliveryDate(row.deliveryDateRaw),
     warehouse: row.warehouse,
     isReserved: reservedOrderIds.has(row.orderId),
+    isBlockedPlatform: blockedPlatformOrderIds.has(row.orderId),
+    orderTime: parseOrderTime(row.orderTimeRaw),
   };
+}
+
+/**
+ * Reads the เวลา cell into a sortable timestamp.
+ *
+ * The cell mixes an order time with an SLA countdown ("Expire 11 ก.ย. 2026
+ * 12:00 หมดอายุใน 19 ชั่วโมง"), so the FIRST Thai date-time in it is taken as
+ * the order's own. Returns null when nothing parses, and null sorts last —
+ * a parse failure must never let an order jump the queue.
+ */
+export function parseOrderTime(raw: string): number | null {
+  if (!raw.trim()) return null;
+  const parsed = parseThaiDateTime(raw.trim());
+  return parsed ? parsed.getTime() : null;
 }
 
 /**
@@ -538,11 +566,21 @@ async function executeTier1(
     // order list (the instant channel gains a "- ส่งทันที (แพ็ก 2 ชั่วโมง)"
     // suffix), so leaves are matched by containment either way round.
     const tree = await wavePage.readLogisticsTree();
-    const carriers = tree.filter(
-      (node) =>
-        !node.isGroup &&
-        [...confirmedChannels].some((channel) => node.title.includes(channel) || channel.includes(node.title)),
-    );
+    // Match on the CANONICAL channel both sides resolve to, not on raw
+    // containment.
+    //
+    // Raw containment waved carriers nobody had confirmed: the tree node
+    // "Shopee-TH-SPX Express - ผู้ซื้อรับที่จุดบริการ SPX" contains the
+    // confirmed channel "Shopee-TH-SPX Express", so `node.title.includes(...)`
+    // was true and a wave would have been built for a courier this cycle never
+    // touched — sweeping in whatever anyone else had confirmed under it.
+    // Resolving the node's own title through the same rules makes an unranked
+    // variant resolve to '' and stop matching anything.
+    const carriers = tree.filter((node) => {
+      if (node.isGroup) return false;
+      const canonical = resolveLogisticsChannel(node.title, config);
+      return canonical !== '' && confirmedChannels.has(canonical);
+    });
     if (carriers.length === 0) {
       await logger.error(
         `wave-engine [${loop}]: confirmed [${[...confirmedChannels].join(', ')}] but none of them appear in the wave ` +
@@ -600,8 +638,14 @@ async function executeTier1(
           // multi-SKU one before a trip up the floor is worth it. Once the
           // batching window has elapsed the whole point is to send what is
           // there, so the per-row threshold steps aside.
+          // Once the batching window has elapsed the per-TYPE bar steps down to
+          // the lower of the two (a single-SKU row no longer waits for 50), but
+          // it never steps down to nothing: a row under the multi-type floor is
+          // left for a person however long it has waited. Passing `undefined`
+          // here used to remove the bar entirely, which is how a 1-2 parcel
+          // wave could be created.
           minParcelsFor: windowElapsed
-            ? undefined
+            ? () => config.minParcelsMultiType
             : (row) =>
                 minParcelsForWaveType(row.waveType, {
                   single: config.minParcelsSingleType,
