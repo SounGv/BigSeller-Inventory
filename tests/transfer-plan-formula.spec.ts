@@ -111,6 +111,66 @@ test.describe('computeReplenishmentCandidates', () => {
     const candidates = computeReplenishmentCandidates(rows, skuStock(100));
     expect(candidates).toHaveLength(0);
   });
+
+  test('excludes a position whose replenishableQty is too small in absolute terms (≤5), even though it clears the 50%-of-max rule', () => {
+    // maxStock=8, stockAtPosition=3 -> raw=5, which is NOT < 8*0.5=4, so the
+    // existing half-of-max rule alone would let it through.
+    const rows = [locationRow({ stockAtPosition: '3', maxStock: '8' })];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(100));
+    expect(candidates).toHaveLength(0);
+  });
+
+  test('includes a position one unit above the absolute floor (replenishableQty=6)', () => {
+    const rows = [locationRow({ stockAtPosition: '2', maxStock: '8' })];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(100));
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].replenishableQty).toBe(6);
+  });
+
+  test('targetZonePrefix filter (real request 2026-08-27, LINE command-bot per-zone trigger): only positions starting with the given prefix are included', () => {
+    const rows = [
+      locationRow({ position: '02U-01-01', stockAtPosition: '5', maxStock: '50' }),
+      locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '50' }),
+    ];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), new Map(), '02U');
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].targetPosition).toBe('02U-01-01');
+  });
+
+  test('targetZonePrefix matches every position under that zone, not just one exact code (e.g. "02U" covers 02U-01-01 through 02U-03-11)', () => {
+    const rows = [
+      locationRow({ position: '02U-01-01', stockAtPosition: '5', maxStock: '50' }),
+      locationRow({ position: '02U-03-11', stockAtPosition: '5', maxStock: '50' }),
+    ];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), new Map(), '02U');
+    expect(candidates).toHaveLength(2);
+  });
+
+  test('targetZonePrefix matching is case-insensitive', () => {
+    const rows = [locationRow({ position: '02U-01-01', stockAtPosition: '5', maxStock: '50' })];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), new Map(), '02u');
+    expect(candidates).toHaveLength(1);
+  });
+
+  test('targetZonePrefix "F" matches F01/F02/F03 together, not a literal zone named just "F" (confirmed with user 2026-08-28)', () => {
+    const rows = [
+      locationRow({ position: 'F01-01-01', stockAtPosition: '5', maxStock: '50' }),
+      locationRow({ position: 'F02-01-01', stockAtPosition: '5', maxStock: '50' }),
+      locationRow({ position: 'F03-01-01', stockAtPosition: '5', maxStock: '50' }),
+      locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '50' }), // must NOT match "F"
+    ];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), new Map(), 'F');
+    expect(candidates.map((c) => c.targetPosition).sort()).toEqual(['F01-01-01', 'F02-01-01', 'F03-01-01']);
+  });
+
+  test('omitting targetZonePrefix plans every zone, unchanged from before this filter existed', () => {
+    const rows = [
+      locationRow({ position: '02U-01-01', stockAtPosition: '5', maxStock: '50' }),
+      locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '50' }),
+    ];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000));
+    expect(candidates).toHaveLength(2);
+  });
 });
 
 test.describe('roundToCartonMultiple', () => {
@@ -189,19 +249,52 @@ test.describe('findSourcePositions', () => {
     expect(findSourcePositions('SKU1', 'CY-001', rows)).toHaveLength(0);
   });
 
-  test('sorts multiple sources by sourceMovableQty descending', () => {
+  test('sorts multiple sources by position code ascending, regardless of quantity (real request 2026-08-27, after PC-036/PC-116 split evenly instead of by size)', () => {
     const rows = [
-      storageRow({ position: 'STORAGE-1', availableStock: '20', minStock: '0' }),
-      storageRow({ position: 'STORAGE-2', availableStock: '50', minStock: '0' }),
+      storageRow({ position: 'STORAGE-2', availableStock: '50', minStock: '0' }), // more stock...
+      storageRow({ position: 'STORAGE-1', availableStock: '20', minStock: '0' }), // ...but STORAGE-1 still comes first
     ];
     const sources = findSourcePositions('SKU1', 'CY-001', rows);
-    expect(sources.map((s) => s.position)).toEqual(['STORAGE-2', 'STORAGE-1']);
+    expect(sources.map((s) => s.position)).toEqual(['STORAGE-1', 'STORAGE-2']);
+  });
+
+  test('position-code sort is numeric-aware — PC-2 comes before PC-10, not after (plain string sort would get this backwards)', () => {
+    const rows = [
+      storageRow({ position: 'PC-10', availableStock: '20', minStock: '0' }),
+      storageRow({ position: 'PC-2', availableStock: '20', minStock: '0' }),
+    ];
+    const sources = findSourcePositions('SKU1', 'CY-001', rows);
+    expect(sources.map((s) => s.position)).toEqual(['PC-2', 'PC-10']);
   });
 
   test('excludes a pick position from ever being used as a source (pick -> pick is never valid, only storage -> pick)', () => {
     // Same SKU, another pick bin (positionType defaults to ตำแหน่งหยิบสินค้า via locationRow) with plenty of stock.
     const rows = [locationRow({ position: 'PC-019', availableStock: '100', minStock: '0' })];
     expect(findSourcePositions('SKU1', 'CY-001', rows)).toHaveLength(0);
+  });
+
+  test('prefers a PC source over a larger non-PC source when the target zone is CR/CB/CY/CW/3B (real request 2026-08-27: "ลังเศษ" broken-carton stock lives in PC)', () => {
+    const rows = [
+      storageRow({ position: 'PC-01', availableStock: '10', minStock: '0' }),
+      storageRow({ position: 'STORAGE-1', availableStock: '100', minStock: '0' }),
+    ];
+    const sources = findSourcePositions('SKU1', 'CR-001', rows); // CY-001 default target is also PC-priority, so use CR explicitly here
+    expect(sources.map((s) => s.position)).toEqual(['PC-01']);
+  });
+
+  test('falls back to non-PC sources when no PC source has movable stock, for a CR/CB/CY/CW/3B target', () => {
+    const rows = [storageRow({ position: 'STORAGE-1', availableStock: '100', minStock: '0' })];
+    const sources = findSourcePositions('SKU1', 'CB-001', rows);
+    expect(sources.map((s) => s.position)).toEqual(['STORAGE-1']);
+  });
+
+  test('does not apply PC-priority for a target zone outside CR/CB/CY/CW/3B (e.g. 01U) — normal position-code-ascending order applies to all sources', () => {
+    const rows = [
+      storageRow({ position: 'STORAGE-1', availableStock: '100', minStock: '0' }),
+      storageRow({ position: 'PC-01', availableStock: '10', minStock: '0' }),
+    ];
+    const sources = findSourcePositions('SKU1', '01U-01-01', rows);
+    expect(sources.map((s) => s.position)).toEqual(['PC-01', 'STORAGE-1']); // "PC-01" < "STORAGE-1" alphabetically — PC isn't prioritized here, just sorts first coincidentally
   });
 });
 
@@ -284,7 +377,7 @@ test.describe('buildTransferPlan', () => {
     expect(exceptions[0].reason).toContain('88');
   });
 
-  test('a carton-eligible target whose sources TOGETHER reach a full carton still gets the move (split across sources is fine)', () => {
+  test('a carton-eligible target whose sources only TOGETHER reach a full carton gets NO move — per-line, not combined (real rule change 2026-09-08: a split like 18+2=20 used to be allowed just because the total hit a clean multiple; user rejected it live after a real document created an awkward 2-piece pickup line)', () => {
     const rows = [
       locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '90' }), // rounds to 88
       storageRow({ position: 'STORAGE-1', availableStock: '50', minStock: '0', maxStock: '0' }),
@@ -294,8 +387,27 @@ test.describe('buildTransferPlan', () => {
     const candidates = computeReplenishmentCandidates(rows, skuStock(1000), cartonQty);
     const { plan, exceptions } = buildTransferPlan('RUN1', candidates, rows);
 
-    expect(plan.reduce((sum, p) => sum + p.moveQty, 0)).toBe(88); // 50 + 38 (capped at the 88 needed)
-    expect(exceptions).toHaveLength(0);
+    // Neither 50 nor 40 alone reaches 88 (1 carton) — both lines get dropped
+    // before totaling, even though 50+40 capped at 88 would have been a
+    // clean multiple under the old rule.
+    expect(plan).toHaveLength(0);
+    expect(exceptions).toHaveLength(1);
+  });
+
+  test('a carton-eligible target where ONE source line alone already clears 1+ cartons keeps that line and floors it — a smaller sibling line that cannot make its own carton is dropped, not combined (the exact 45436 case: 18 from one position + 2 from another, cartonQty=10 — only the 18 survives, then floors to 10)', () => {
+    const rows = [
+      locationRow({ position: '01U-01-01', stockAtPosition: '0', maxStock: '20' }), // rawReplenishableQty=20 -> already a clean 2-carton multiple
+      storageRow({ position: 'STORAGE-1', availableStock: '18', minStock: '0', maxStock: '0' }), // >= 1 carton (10), survives
+      storageRow({ position: 'STORAGE-2', availableStock: '2', minStock: '0', maxStock: '0' }), // < 1 carton (10), dropped even though 18+2=20 is a clean multiple
+    ];
+    const cartonQty = new Map([['SKU1', 10]]);
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), cartonQty);
+    const { plan, exceptions } = buildTransferPlan('RUN1', candidates, rows);
+
+    expect(plan).toHaveLength(1);
+    expect(plan[0].sourcePosition).toBe('STORAGE-1');
+    expect(plan[0].moveQty).toBe(10); // 18 floored down to the nearest whole carton (10), not the full 18
+    expect(exceptions).toHaveLength(1); // the floor-down of 18->10 itself logs an exception (8 units left behind)
   });
 
   test('a carton-eligible move that clears 1 carton but is NOT an exact multiple gets trimmed down to the nearest whole carton (real bug 2026-08-26: 239 available at cartonQty=50 shipped as 239, should floor to 200)', () => {
@@ -312,7 +424,7 @@ test.describe('buildTransferPlan', () => {
     expect(exceptions.some((e) => e.reason.includes('200') && e.reason.includes('39'))).toBe(true);
   });
 
-  test('trimming a non-multiple total reduces the LAST source added first, leaving earlier sources untouched', () => {
+  test('each source line floors independently to its own carton multiple — never borrows from/trims based on another line\'s total (updated 2026-09-08: this used to be "trim the excess off the last row based on the combined total"; now each line stands alone, which happens to floor to the same numbers here since STORAGE-2\'s own floor(89/50)*50 is 50 regardless)', () => {
     const rows = [
       locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '300' }),
       storageRow({ position: 'STORAGE-1', availableStock: '150', minStock: '0', maxStock: '0' }), // tried first (largest)

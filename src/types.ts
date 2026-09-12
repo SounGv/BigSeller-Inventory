@@ -136,6 +136,26 @@ export interface SkuSalesRow {
   avgDailySales: number;
 }
 
+/** One SKU line from one order on `order/index.htm?status=new` — one order can produce several of these (multi-line-item orders). `store` decides which sheet this ends up in (see order-demand-service.ts): `store === 'LockStock'` → offline lock, anything else → pending online demand. `orderId` is BigSeller's own internal numeric id (the `<tr data-orderid="...">` attribute, confirmed live 2026-08-31) — used as the join key between the LockStock-filtered and unfiltered scrapes since it's guaranteed unique/stable, unlike the human-typed `orderNo`. */
+export interface NewOrderLineRow {
+  sku: string;
+  qty: number;
+  store: string;
+  platform: string;
+  orderId: string;
+  orderNo: string;
+  buyerOrLabel: string;
+  orderTime: string;
+  sourceUrl: string;
+}
+
+export type LockStatus = 'confirmed' | 'pending_confirm';
+
+/** Dedupe key for DB_PENDING_ORDER_DEMAND / DB_OFFLINE_LOCK — these sheets reflect current-state-at-sync-time, not history, so the key intentionally does NOT include runId (see writeOrderDemand in order-demand-service.ts). */
+export function newOrderLineKey(row: Pick<NewOrderLineRow, 'orderNo' | 'sku'>): string {
+  return [row.orderNo, row.sku].join('::');
+}
+
 export type LineNotifyStatus = 'success' | 'failed';
 
 /** One row per runId ever notified about — the dedupe record that stops import:moves from re-notifying the same run twice (e.g. on a retried/resumed import). */

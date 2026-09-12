@@ -19,5 +19,10 @@ output/
 !.env.example
 secrets/
 
+# MCP config holds a real Supabase access token directly (${VAR} expansion
+# confirmed broken in this IDE-embedded host, 2026-09-01 — see mcp-server-supabase
+# setup notes) — never commit this file.
+.mcp.json
+
 # Local Claude Code config (personal, not project-scoped)
 .claude/

@@ -133,6 +133,39 @@ export class SheetsClient {
 
     await logger.info(`Upserted into ${sheetName}: ${updates.length} updated, ${toAppend.length} inserted`);
   }
+
+  /**
+   * Clears every data row below the header and writes `rows` fresh — for a
+   * sheet that must reflect current-state-at-sync-time rather than
+   * accumulated history (e.g. DB_PENDING_ORDER_DEMAND, DB_OFFLINE_LOCK: a
+   * closed/confirmed order must disappear on the next sync, which
+   * {@link upsertRows} can never do since it only updates-or-appends and
+   * never removes a key that stopped showing up). Writes the header row too
+   * in case the sheet was ever completely empty. Uses `values.clear` (not
+   * `values.update` with blank strings) so no stale formatting/formulas are
+   * left dangling in rows past the new data.
+   */
+  async replaceAll(sheetName: string, headers: string[], rows: Record<string, string | number>[]): Promise<void> {
+    if (DRY_RUN) {
+      await logger.info(`[DRY_RUN] Would replace ${sheetName} with ${rows.length} row(s)`);
+      return;
+    }
+
+    await this.sheets.spreadsheets.values.clear({
+      spreadsheetId: this.spreadsheetId,
+      range: `${sheetName}!A2:ZZ`,
+    });
+
+    const lastCol = columnLetter(headers.length);
+    const values = [headers, ...rows.map((r) => headers.map((h) => r[h] ?? ''))];
+    await this.sheets.spreadsheets.values.update({
+      spreadsheetId: this.spreadsheetId,
+      range: `${sheetName}!A1:${lastCol}${values.length}`,
+      valueInputOption: 'RAW',
+      requestBody: { values },
+    });
+    await logger.info(`Replaced ${sheetName}: ${rows.length} row(s) written`);
+  }
 }
 
 /** Converts a 1-indexed column count to its A1-notation letter (13 -> "M", 27 -> "AA"). */
