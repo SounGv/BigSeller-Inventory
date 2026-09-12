@@ -195,6 +195,17 @@ export async function syncBigSeller(page: Page, sheetsClient: SheetsClient): Pro
   try {
     const locationRows = await syncLocationAllTypes(page, sheetsClient, runId);
     const skuRows = await syncSkuInventory(page, sheetsClient, runId);
+    // DISABLED 2026-09-01 per explicit user request ("ไม่เอาแล้ว" — stop the
+    // new-orders scrape going forward, but keep the code). Was: "await
+    // syncOrderDemand(page, sheetsClient, runId);", added 2026-08-31 per
+    // FEATURE-pending-demand-and-offline-lock.md. order-demand-service.ts,
+    // new-orders-page.ts, and computeEffectiveAvailableStock() in
+    // transfer-plan-service.ts are all left in place and still work — just no
+    // longer invoked automatically here. planMoves() will keep reading
+    // whatever DB_PENDING_ORDER_DEMAND/DB_OFFLINE_LOCK last had (frozen at
+    // their last real sync) instead of refreshing it every run. Still
+    // callable on demand via `npm run sync:order-demand` if ever needed
+    // again — that entry point is untouched.
     const syncCompletedAt = new Date().toISOString();
 
     await logSync(

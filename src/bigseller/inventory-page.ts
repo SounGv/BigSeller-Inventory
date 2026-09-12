@@ -50,7 +50,15 @@ export class BigSellerInventoryPage {
   }
 
   private get warehouseFilterTrigger() {
-    return this.filterField('คลังสินค้า').locator('[class*="bs-antd_multiple_select"]');
+    // BigSeller migrated this control's markup at some point after
+    // 2026-08-24 (confirmed live 2026-09-02, while building the decoy-
+    // warehouse reconciliation feature): the old `bs-antd_multiple_select`
+    // class is gone from the live DOM, replaced by
+    // `bs-new-select_multiple_select` (still with a runtime numeric suffix,
+    // e.g. `bs-new-select-vue2-multiple-1788334863153-0`) — matches both so
+    // this doesn't silently break again if BigSeller only partially rolls
+    // the new component out, or reverts.
+    return this.filterField('คลังสินค้า').locator('[class*="bs-antd_multiple_select"], [class*="bs-new-select_multiple_select"]');
   }
 
   private get areaFilterTrigger() {

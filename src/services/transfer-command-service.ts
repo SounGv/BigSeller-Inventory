@@ -43,8 +43,14 @@ function describeError(error: unknown): string {
  * Never throws — every failure mode returns a PipelineOutcome with ok:false
  * so the caller can always push a status message back to the group instead
  * of leaving staff wondering whether anything happened.
+ *
+ * `targetZonePrefix` (optional, e.g. "02U") restricts replenishment to that
+ * one zone — parsed from the triggering LINE message text by
+ * `line-command-bot.ts`. Still always syncs and exports/imports the whole
+ * warehouse's data; only which TARGET positions get planned is narrowed. See
+ * `planMoves` in transfer-plan-service.ts for the exact matching rule.
  */
-export async function runFullTransferPipeline(sheetsClient: SheetsClient): Promise<PipelineOutcome> {
+export async function runFullTransferPipeline(sheetsClient: SheetsClient, targetZonePrefix?: string): Promise<PipelineOutcome> {
   const autoImport = (process.env.AUTO_IMPORT ?? 'false').toLowerCase() === 'true';
   if (!autoImport) {
     return {
@@ -69,12 +75,13 @@ export async function runFullTransferPipeline(sheetsClient: SheetsClient): Promi
 
   let plan;
   try {
-    ({ plan } = await planMoves(sheetsClient, runId));
+    ({ plan } = await planMoves(sheetsClient, runId, targetZonePrefix));
   } catch (error) {
     return { ok: false, stage: 'plan', runId, message: describeError(error) };
   }
   if (plan.length === 0) {
-    return { ok: true, stage: 'done', runId, succeededFiles: 0, totalFiles: 0, message: 'ตรวจสอบแล้ว — ไม่มีตำแหน่งที่ต้องเติมสต็อกในรอบนี้ ไม่ได้สร้างใบย้ายใดๆ' };
+    const zoneNote = targetZonePrefix ? `ในโซน ${targetZonePrefix} ` : '';
+    return { ok: true, stage: 'done', runId, succeededFiles: 0, totalFiles: 0, message: `ตรวจสอบแล้ว — ไม่มีตำแหน่ง${zoneNote}ที่ต้องเติมสต็อกในรอบนี้ ไม่ได้สร้างใบย้ายใดๆ` };
   }
 
   const dateStamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');

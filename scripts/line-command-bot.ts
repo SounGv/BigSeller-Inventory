@@ -81,12 +81,31 @@ function matchesTriggerKeyword(text: string): boolean {
   return TRIGGER_KEYWORDS.some((kw) => text.includes(kw));
 }
 
-async function runPipelineAndReport(): Promise<void> {
+/**
+ * Pulls an optional zone-code token (e.g. "02U", "3B", "CR") out of a
+ * trigger message like "สร้างใบย้าย 02U ให้หน่อย" — explicit request from the
+ * user (2026-08-27), confirmed to mean "every pick position starting with
+ * that prefix" (02U-01-01, 02U-02-07, ... all match "02U"), the same
+ * `position.split('-')[0]` convention used throughout transfer-plan-service.ts.
+ *
+ * `BOT_NAME` is stripped first so an English bot name (e.g. "GV Inventory
+ * Bot") mentioned in the message never gets mistaken for a zone code — Thai
+ * trigger keywords never match the Latin/digit pattern below, so only the
+ * bot name needs this treatment. Returns undefined when no such token is
+ * found, meaning "no zone filter" (plan every zone, the original behavior).
+ */
+function extractZonePrefix(text: string): string | undefined {
+  const withoutBotName = text.split(BOT_NAME).join(' ');
+  const match = withoutBotName.match(/[A-Za-z0-9]{2,6}/);
+  return match ? match[0].toUpperCase() : undefined;
+}
+
+async function runPipelineAndReport(targetZonePrefix?: string): Promise<void> {
   if (pipelineInFlight) return; // guarded by caller, but stay safe if called twice
   pipelineInFlight = true;
   try {
     const sheetsClient = await SheetsClient.create();
-    const outcome = await runFullTransferPipeline(sheetsClient);
+    const outcome = await runFullTransferPipeline(sheetsClient, targetZonePrefix);
     await logger.info(`line-command-bot: pipeline outcome — ${JSON.stringify(outcome)}`);
 
     // The success-with-documents case already pushed the full P1-P4
@@ -172,8 +191,10 @@ const server = createServer((req, res) => {
         continue;
       }
 
-      await replyText(replyToken, `รับคำสั่งแล้วครับ กำลังสร้างใบย้ายสินค้า รอสักครู่นะครับ 🙏\nจะแจ้งผลกลับในกลุ่มเมื่อเสร็จ`);
-      void runPipelineAndReport();
+      const targetZonePrefix = extractZonePrefix(event.message.text);
+      const zoneAckNote = targetZonePrefix ? `เฉพาะโซน ${targetZonePrefix} ` : '';
+      await replyText(replyToken, `รับคำสั่งแล้วครับ กำลังสร้างใบย้ายสินค้า${zoneAckNote}รอสักครู่นะครับ 🙏\nจะแจ้งผลกลับในกลุ่มเมื่อเสร็จ`);
+      void runPipelineAndReport(targetZonePrefix);
     }
   });
 });

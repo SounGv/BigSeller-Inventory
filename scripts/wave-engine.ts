@@ -11,6 +11,7 @@ import { PLATFORM_CUTOFF } from '../src/wave-engine/channel-policy.js';
 import { DecisionLog } from '../src/wave-engine/decision-log.js';
 import { startScheduler } from '../src/wave-engine/scheduler.js';
 import { runCycle, runFastCycle, toDomainOrder } from '../src/wave-engine/wave-engine-service.js';
+import { minParcelsForWaveType } from '../src/wave-engine/wave-state.js';
 import { bangkokHhMm, classifyOrder, resolveLogisticsChannel } from '../src/wave-engine/tiers.js';
 import { floorsForOrder, loadSkuFloors } from '../src/wave-engine/sku-floor.js';
 import { acquireRunLock } from '../src/wave-engine/run-lock.js';
@@ -42,12 +43,13 @@ async function main(): Promise<void> {
   const board = args.includes('--board');
   const fast = args.includes('--fast');
   const zones = args.includes('--zones');
+  const bulk = args.includes('--bulk');
   const dumpLimit = Number(args.find((arg) => /^\d+$/.test(arg)) ?? 5);
 
   const config = loadWaveEngineConfig();
   assertStorageStateExists();
 
-  const mode = zones ? 'zones' : board ? 'board' : waveDryRun ? 'wave-dry-run' : dump ? 'dump' : fast ? 'fast' : once ? 'once' : 'daemon';
+  const mode = bulk ? 'bulk' : zones ? 'zones' : board ? 'board' : waveDryRun ? 'wave-dry-run' : dump ? 'dump' : fast ? 'fast' : once ? 'once' : 'daemon';
   await logger.info(
     `wave-engine: starting (mode=${mode}) ` +
       `live_priorities=${[...config.livePriorities].join(',') || 'none (full dry run)'} urgent=${config.urgentLoopMinutes}min main=${config.mainLoopMinutes}min ` +
@@ -93,6 +95,11 @@ async function main(): Promise<void> {
 
     if (zones) {
       await printZonePlan(page, config);
+      return;
+    }
+
+    if (bulk) {
+      await runBulkRound(page, config);
       return;
     }
 
@@ -150,6 +157,115 @@ async function main(): Promise<void> {
  * done the counting itself. It answers the only question that matters at the
  * start of a round — which courier to confirm first — and it touches nothing.
  */
+/**
+ * `--bulk`: one courier, the way the warehouse actually works it.
+ *
+ * Narrow the platform filter, narrow the logistics filter to a single courier,
+ * check the count has reached the target, press the page's own ยืนยัน button
+ * once, then build that courier's wave (instructed 2026-09-12: "กรอง
+ * แพลตฟอร์ม โลจิสติกส์ ครบจำนวนตามที่งานที่ตั้งไว้", then "เลือกออเดอร์ยืนยัน
+ * ไปสร้าง wave").
+ *
+ * This replaces confirming row by row, which was slower than a person and, on
+ * the two orders it was tried on live, did not land at all.
+ *
+ * Narrowing to one courier is also what keeps reservations out: LockStock
+ * orders are Seller Delivery, so any other courier's filter excludes them by
+ * construction rather than by the bot remembering to.
+ */
+async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
+  await ensureSessionValid(page, NEW_ORDERS_URL);
+  const priorityPage = new BigSellerOrderPriorityPage(page);
+  await priorityPage.goto();
+
+  const now = new Date();
+  const nowHhMm = bangkokHhMm(now);
+  const logistics = await readFilterPills(page, 'โลจิสติกส์');
+
+  // Rank what is waiting, best first, and keep only couriers whose own timing
+  // rule says they may go now.
+  const candidates = logistics
+    .filter((pill) => pill.label !== 'ทั้งหมด' && (pill.count ?? 0) > 0)
+    .map((pill) => {
+      const channel = resolveLogisticsChannel(pill.label, config);
+      return { pill, channel, policy: config.channelPolicies[channel] };
+    })
+    .filter((entry) => entry.policy !== undefined)
+    .sort((a, b) => a.policy!.priority - b.policy!.priority);
+
+  const lines: string[] = ['', `=== รอบยืนยันรวม (${nowHhMm}) ===`];
+  let acted = false;
+
+  for (const { pill, channel, policy } of candidates) {
+    const count = pill.count ?? 0;
+    const live = config.livePriorities.has(policy!.priority);
+    const target = config.minParcelsMultiType;
+
+    if (count < target) {
+      lines.push(`  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ — ยังไม่ถึงเป้า ${target} ใบ ข้ามไปก่อน`);
+      continue;
+    }
+    if (!live) {
+      lines.push(
+        `  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ ครบเป้าแล้ว — แต่ลำดับนี้ยังไม่ได้เปิดโหมดทำงานจริง ไม่กด`,
+      );
+      continue;
+    }
+
+    lines.push(`  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ ครบเป้า — ยืนยันรวมแล้วสร้าง Wave`);
+    await priorityPage.selectLogisticsFilter(pill.label);
+    const result = await priorityPage.bulkConfirmFiltered({
+      expectedCourier: pill.label,
+      allowedPlatforms: config.allowedPlatforms,
+      reservedStore: config.reservedStore,
+      maxOrders: Number(process.env.WAVE_ENGINE_MAX_LIVE_CONFIRMS ?? count),
+    });
+    lines.push(`           ยืนยัน ${result.confirmed} ใบ — ${result.note}`);
+    await logger.info(`wave-engine [bulk] ${pill.label}: confirmed ${result.confirmed} — ${result.note}`);
+
+    if (result.confirmed > 0) {
+      const wavePage = new BigSellerGenerateWavePage(page);
+      await wavePage.goto();
+      const tree = await wavePage.readLogisticsTree();
+      const carrier = tree.find((node) => !node.isGroup && resolveLogisticsChannel(node.title, config) === channel);
+      if (!carrier) {
+        lines.push('           หาขนส่งเจ้านี้ในหน้าสร้าง Wave ไม่เจอ — ยังไม่ได้สร้าง Wave');
+      } else {
+        const wave = await wavePage.createWave(
+          { title: carrier.title, group: carrier.group },
+          {
+            shippingWarehouse: config.pickingWarehouse,
+            minParcelsFor: (row) =>
+              minParcelsForWaveType(row.waveType, {
+                single: config.minParcelsSingleType,
+                multi: config.minParcelsMultiType,
+              }).min,
+          },
+        );
+        lines.push(`           Wave: ${wave.created ? 'สร้างแล้ว' : 'ไม่ได้สร้าง'} — ${wave.note}`);
+        for (const row of wave.rows) {
+          lines.push(`             โซน ${row.zone} · ${row.parcelCount} พัสดุ · ${row.itemCount} ชิ้น`);
+        }
+      }
+      await wavePage
+        .setLogisticsScope([{ title: 'โลจิสติกส์ทั้งหมด' }])
+        .catch((error: Error) => logger.warn(`wave-engine [bulk]: could not restore the wave page tree — ${error.message}`));
+      await priorityPage.goto();
+    }
+
+    acted = true;
+    // One courier per round. The queue and the counters both move underneath a
+    // bulk confirm, so the next courier is decided by a fresh look, not by a
+    // list read before any of this happened.
+    break;
+  }
+
+  if (!acted) lines.push('  (ยังไม่มีขนส่งเจ้าไหนที่ครบเป้าและเปิดโหมดทำงานจริงไว้)');
+  lines.push('');
+  console.log(lines.join('\n'));
+  await priorityPage.resetAllFilters();
+}
+
 /** Which truck a platform's parcels leave on. Platform names come from the filter row itself. */
 function platformCutoffOf(platformLabel: string): string | undefined {
   const label = platformLabel.toLowerCase();

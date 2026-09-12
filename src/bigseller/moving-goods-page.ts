@@ -78,13 +78,28 @@ export class BigSellerMovingGoodsPage {
     await humanDelay();
   }
 
+  /**
+   * Dropdown option locator — matches BOTH the old antd markup (`role="option"`)
+   * and BigSeller's newer custom select widget, confirmed live 2026-09-03 to
+   * render options with NO accessible role at all
+   * (`<span class="bs-new-select_select_option_title_text">STOCK_5</span>`,
+   * 5 levels of plain `<span>` ancestors, zero `role="option"` anywhere on
+   * the page) — same class of markup migration already hit once before on
+   * the inventory warehouse filter (see `warehouseFilterTrigger` in
+   * inventory-page.ts). `role=option` kept as the first alternative in case
+   * BigSeller ever reverts/mixes both on a given account.
+   */
+  private warehouseOption(name: string) {
+    return this.page.locator(`[role="option"]:text-is("${name}"), .bs-new-select_select_option_title_text:text-is("${name}")`);
+  }
+
   async selectWarehouse(name: string): Promise<void> {
     await dismissLanguageSwitchGuideIfPresent(this.page);
     const current = await this.warehouseFilterCombobox.textContent();
     if (current?.trim() === name) return;
     await clickThroughGuide(this.page, this.warehouseFilterCombobox);
     await humanDelay(200, 500);
-    await clickThroughGuide(this.page, this.page.getByRole('option', { name, exact: true }));
+    await clickThroughGuide(this.page, this.warehouseOption(name));
     await humanDelay();
   }
 
