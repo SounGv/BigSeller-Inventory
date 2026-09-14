@@ -49,9 +49,11 @@ Never commit `.env`, `secrets/`, or `playwright/.auth/`. They are gitignored; ke
 | `npm run wave-engine -- --wave-dry-run` | What is waveable per carrier, split into "ready" vs "left for a human" | No |
 | `npm run wave-engine -- --dump` | Raw order rows next to what the parser made of them | No |
 | `npm run wave-engine -- --zones` | Which FLOOR each channel's orders pick from, and which orders span both | No — ~4 min |
+| `npm run wave-engine -- --expiring` | Every order still open, soonest-to-expire first, split into "inside the urgent window" vs the rest | No — ~2-4 min |
+| `npm run wave-engine -- --bulk` | One courier at a time: filter to it, check the target is met, press BigSeller's own ยืนยัน button, then wave it | Only if live priorities are set |
 | `npm run wave-engine -- --once` | One full cycle: scan, decide, log | Only if live priorities are set |
 | `npm run wave-engine -- --fast` | Same, but acts on the single highest-priority carrier — ~20s instead of ~2 min | Only if live priorities are set |
-| `npm run wave-engine` | Daemon: urgent loop every ~3 min, main loop every ~12 min | Only if live priorities are set |
+| `npm run wave-engine` | Daemon: urgent loop every ~3 min, main loop every ~12 min, plus the pre-shift trigger below if set | Only if live priorities are set |
 
 Start with `--board`. It answers "what do I confirm first" without reading a single row,
 because BigSeller already counts the queue for you.
@@ -61,8 +63,16 @@ because BigSeller already counts the queue for you.
 **One engine at a time.** Anything that can click takes a lock (`logs/wave-engine.lock`) and
 refuses to start while another such run is alive. Two engines on one account scan the same
 queue, reset each other's filters mid-read, and can confirm the same order twice. Read-only
-modes (`--board`, `--zones`, `--wave-dry-run`, `--dump`) skip the lock — they are safe to run
-while the engine works.
+modes (`--board`, `--zones`, `--expiring`, `--wave-dry-run`, `--dump`) skip the lock — they are
+safe to run while the engine works.
+
+**Pre-shift round.** `WAVE_ENGINE_PRE_SHIFT_TIME` fires ONE real cycle at a fixed clock time —
+unlike the two stub triggers in `.env.example`, this one actually confirms and waves (wherever
+`WAVE_ENGINE_LIVE_PRIORITIES` already allows), so Waves are already built and sitting ready
+BEFORE staff start their afternoon shift, instead of them waiting on it (2026-09-14). Only fires
+inside the daemon (`npm run wave-engine` with no mode flag) — a one-shot `--once` run doesn't
+have a clock to wait on. Blank by default: "11:55" was given as an example, not the team's
+confirmed shift-start time.
 
 **Every cycle starts from a clean page.** BigSeller remembers filters across page loads, so
 reloading the URL is not a fresh start: whatever the last run or the last person left selected
@@ -150,7 +160,7 @@ a picker walking between floors. They are logged for a human every time.
   batching window measures from.
 
 ```bash
-npm run test:unit     # 174 unit tests, no browser needed
+npm run test:unit     # 177 unit tests, no browser needed
 npx tsc --noEmit
 ```
 

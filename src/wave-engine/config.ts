@@ -25,6 +25,21 @@ export interface WaveEngineConfig {
   endOfDaySweepTime: string | null;
   /** Fixed-time safety check before the standard-round cutoffs. Stub only — nothing acts on it yet. */
   forcedTriggerTime: string;
+  /**
+   * A real confirm-and-wave cycle fired once at a fixed clock time, so a
+   * courier's Waves are already built and sitting ready BEFORE staff start
+   * their afternoon shift — not something they wait on. Requested 2026-09-14
+   * ("ต้องเผื่อเวลา ทำงานก่อนที่พนักงานจะเริ่มทำงานรอบบ่าย ... เช่น 11 โมง 55
+   * ดึงออเดอร์และไปสร้าง wave"). Unlike forcedTriggerTime/endOfDaySweepTime's
+   * log-only stubs, this one is real — it runs the same cycle the main loop
+   * runs, clicking wherever WAVE_ENGINE_LIVE_PRIORITIES already allows it to.
+   *
+   * Deliberately UNSET by default, same reasoning as CUTOFF_WINDOWS and
+   * END_OF_DAY_SWEEP_TIME above: 11:55 was given as "เช่น" (an example), not
+   * the team's confirmed shift-start time, and there is no honest number to
+   * schedule a real write against until someone gives one.
+   */
+  preShiftRoundTime: string | null;
   /** Exactly which priorities may click for real. Empty = full dry run. Nothing self-enables. */
   livePriorities: ReadonlySet<Tier>;
   urgentLoopMinutes: number;
@@ -154,6 +169,7 @@ export function loadWaveEngineConfig(env: NodeJS.ProcessEnv = process.env): Wave
     channelPolicies: { ...DEFAULT_CHANNEL_POLICIES, ...loadChannelOverrides(env.WAVE_ENGINE_CHANNEL_MAP_PATH) },
     endOfDaySweepTime: parseTimeOfDay(env.WAVE_ENGINE_END_OF_DAY_SWEEP, 'END_OF_DAY_SWEEP'),
     forcedTriggerTime: parseTimeOfDay(env.WAVE_ENGINE_FORCED_TRIGGER, 'FORCED_TRIGGER') ?? '15:45',
+    preShiftRoundTime: parseTimeOfDay(env.WAVE_ENGINE_PRE_SHIFT_TIME, 'PRE_SHIFT_TIME'),
     livePriorities: parseLivePriorities(env.WAVE_ENGINE_LIVE_PRIORITIES),
     urgentLoopMinutes: Number(env.WAVE_ENGINE_URGENT_LOOP_MINUTES ?? 3),
     mainLoopMinutes: Number(env.WAVE_ENGINE_MAIN_LOOP_MINUTES ?? 12),

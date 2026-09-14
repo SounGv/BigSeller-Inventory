@@ -44,12 +44,13 @@ async function main(): Promise<void> {
   const fast = args.includes('--fast');
   const zones = args.includes('--zones');
   const bulk = args.includes('--bulk');
+  const expiring = args.includes('--expiring');
   const dumpLimit = Number(args.find((arg) => /^\d+$/.test(arg)) ?? 5);
 
   const config = loadWaveEngineConfig();
   assertStorageStateExists();
 
-  const mode = bulk ? 'bulk' : zones ? 'zones' : board ? 'board' : waveDryRun ? 'wave-dry-run' : dump ? 'dump' : fast ? 'fast' : once ? 'once' : 'daemon';
+  const mode = expiring ? 'expiring' : bulk ? 'bulk' : zones ? 'zones' : board ? 'board' : waveDryRun ? 'wave-dry-run' : dump ? 'dump' : fast ? 'fast' : once ? 'once' : 'daemon';
   await logger.info(
     `wave-engine: starting (mode=${mode}) ` +
       `live_priorities=${[...config.livePriorities].join(',') || 'none (full dry run)'} urgent=${config.urgentLoopMinutes}min main=${config.mainLoopMinutes}min ` +
@@ -67,7 +68,7 @@ async function main(): Promise<void> {
 
   // Read-only modes are safe to run beside a working engine; anything that can
   // click is not.
-  const readOnly = board || waveDryRun || dump || zones;
+  const readOnly = board || waveDryRun || dump || zones || expiring;
   const releaseLock = readOnly ? () => undefined : await acquireRunLock(mode);
 
   const headless = (process.env.BIGSELLER_HEADLESS ?? 'false').toLowerCase() === 'true';
@@ -100,6 +101,11 @@ async function main(): Promise<void> {
 
     if (bulk) {
       await runBulkRound(page, config);
+      return;
+    }
+
+    if (expiring) {
+      await printExpiringSoon(page, config);
       return;
     }
 
@@ -397,6 +403,78 @@ async function printZonePlan(page: Page, config: ReturnType<typeof loadWaveEngin
   console.log(lines.join('\n'));
 }
 
+/**
+ * `--expiring`: which orders are closest to BigSeller's own auto-cancel
+ * deadline, soonest first ("ใกล้หมดอายุก่อน", 2026-09-14).
+ *
+ * Read-only — a full scan of the picking warehouse, same exclusions as a real
+ * cycle (LockStock reservations and non-marketplace platforms never counted),
+ * sorted by `expiresAt` ascending. This is the only way to see the deadline
+ * before a cycle runs: `--board` reads filter PILL COUNTS, which have no idea
+ * which individual orders are close to expiring.
+ *
+ * Splits into "inside the urgent window" (WAVE_ENGINE_EXPIRY_URGENT_MINUTES —
+ * these are what applyExpiryUrgency in tiers.ts will confirm on the next real
+ * cycle regardless of tier timing) and "everything else with a known
+ * deadline", so a human deciding what to do before that cycle runs can see
+ * the same list the engine will act on.
+ */
+async function printExpiringSoon(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
+  await ensureSessionValid(page, NEW_ORDERS_URL);
+  const priorityPage = new BigSellerOrderPriorityPage(page);
+  await priorityPage.goto();
+
+  const reservedOrderIds = await priorityPage.collectStoreOrderIds(config.reservedStore);
+  const blockedPlatformOrderIds = await priorityPage.collectBlockedPlatformOrderIds(config.allowedPlatforms);
+
+  await priorityPage.selectWarehouses([config.pickingWarehouse]);
+  const expectedCount = (await priorityPage.readWarehouseOptions()).find((o) => o.name === config.pickingWarehouse)?.count;
+  const rows = await priorityPage.scanOrders({ depth: 'full', warehouseScope: config.pickingWarehouse, expectedCount });
+  await priorityPage.selectWarehouses('all');
+
+  const orders = rows
+    .map((row) => toDomainOrder(row, config, reservedOrderIds, blockedPlatformOrderIds))
+    .filter((order) => !order.isReserved && !order.isBlockedPlatform);
+
+  const now = Date.now();
+  const withDeadline = orders
+    .filter((order) => order.expiresAt !== null)
+    .sort((a, b) => a.expiresAt! - b.expiresAt!);
+  const noDeadline = orders.length - withDeadline.length;
+
+  const describe = (order: (typeof orders)[number]) => {
+    const minutesLeft = Math.round((order.expiresAt! - now) / 60000);
+    const readable =
+      minutesLeft <= 0
+        ? 'หมดอายุแล้ว'
+        : minutesLeft < 60
+          ? `เหลือ ${minutesLeft} นาที`
+          : `เหลือ ${(minutesLeft / 60).toFixed(1)} ชม.`;
+    const channel = order.logisticsChannel || `(ไม่รู้จัก: ${order.rawShippingCell.slice(0, 40)})`;
+    return `  ${readable.padEnd(14)} ${order.orderNo || order.orderId}   ${channel}`;
+  };
+
+  const urgent = withDeadline.filter((o) => (o.expiresAt! - now) / 60000 <= config.expiryUrgentMinutes);
+  const rest = withDeadline.filter((o) => (o.expiresAt! - now) / 60000 > config.expiryUrgentMinutes);
+
+  const lines = [
+    '',
+    `=== ใกล้หมดอายุก่อน (${config.pickingWarehouse}, ${bangkokHhMm(new Date())}) ===`,
+    `เกณฑ์ด่วน: เหลือไม่ถึง ${config.expiryUrgentMinutes} นาที (WAVE_ENGINE_EXPIRY_URGENT_MINUTES)`,
+    '',
+    `--- ด่วน — บอทจะยืนยันทันทีในรอบถัดไป ไม่ว่าลำดับปกติจะว่าอย่างไร (${urgent.length} ใบ) ---`,
+    ...(urgent.length > 0 ? urgent.map(describe) : ['  (ไม่มี)']),
+    '',
+    `--- ยังไม่ด่วน แต่มีกำหนดหมดอายุ เรียงใกล้สุดก่อน (${rest.length} ใบ) ---`,
+    ...(rest.length > 0 ? rest.slice(0, 30).map(describe) : ['  (ไม่มี)']),
+    ...(rest.length > 30 ? [`  ... อีก ${rest.length - 30} ใบ`] : []),
+    '',
+    `ไม่มีข้อมูลวันหมดอายุ: ${noDeadline} ใบ (อาจเป็นออเดอร์ที่ไม่มีป้าย Expire ในหน้าเว็บ)`,
+    '',
+  ];
+  console.log(lines.join('\n'));
+}
+
 async function printPriorityBoard(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
   await ensureSessionValid(page, NEW_ORDERS_URL);
   const priorityPage = new BigSellerOrderPriorityPage(page);
@@ -622,6 +700,9 @@ async function runDaemon(
   const scheduler = startScheduler(config, {
     runUrgent: guardedCycle('urgent'),
     runMain: guardedCycle('main'),
+    // Same full cycle as the main loop — the point of the pre-shift trigger
+    // is to be ready before staff arrive, not to do something different.
+    runPreShift: guardedCycle('main'),
   });
 
   function stop(): void {

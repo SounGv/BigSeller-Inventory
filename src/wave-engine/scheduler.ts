@@ -30,6 +30,8 @@ class CycleLock {
 export interface SchedulerHandlers {
   runUrgent: () => Promise<void>;
   runMain: () => Promise<void>;
+  /** Fired once at `config.preShiftRoundTime`, through the same lock as the interval loops. Optional so a caller with nothing to do before a shift can omit it. */
+  runPreShift?: () => Promise<void>;
 }
 
 export interface SchedulerHandle {
@@ -129,12 +131,24 @@ export function startScheduler(config: WaveEngineConfig, handlers: SchedulerHand
     const today = bangkokDateKey(new Date());
     const nowHhMm = bangkokHhMm(new Date());
 
-    const fireOnce = (name: string, at: string | null, message: string) => {
+    const fireOnce = (name: string, at: string | null, message: string, action?: () => Promise<void>) => {
       if (!at || nowHhMm < at) return;
       const key = `${today}:${name}`;
       if (firedToday.has(key)) return;
       firedToday.add(key);
       void logger.warn(`wave-engine: ${name} trigger fired at ${nowHhMm} — ${message}`);
+      if (!action) return;
+      // Through the SAME lock as the interval loops, not a bare call — firing
+      // this while an urgent/main tick is mid-scan would mean two cycles
+      // touching the filters and the confirm button at once.
+      void lock.run(name, action).catch((error: Error) => {
+        if (isUnrecoverableBrowserError(error.message)) {
+          void logger.error(`wave-engine: "${name}" cycle failed and the browser is gone (${error.message}) — stopping the daemon. Restart it.`);
+          stop();
+          return;
+        }
+        void logger.error(`wave-engine: "${name}" cycle failed: ${error.message}`);
+      });
     };
 
     fireOnce(
@@ -143,6 +157,13 @@ export function startScheduler(config: WaveEngineConfig, handlers: SchedulerHand
       'STUB: a pre-cutoff safety check for the standard-round priorities. Does nothing until real truck times exist.',
     );
     fireOnce('eod-sweep', config.endOfDaySweepTime, 'STUB: Seller Delivery end-of-day sweep is dry-run only.');
+    fireOnce(
+      'pre-shift-round',
+      config.preShiftRoundTime,
+      'confirming and waving whatever is eligible now, so it is ready before staff start their afternoon shift ' +
+        '("ต้องเผื่อเวลา ... เสร็จก่อนบ่าย", 2026-09-14) — real orders touched only where WAVE_ENGINE_LIVE_PRIORITIES allows',
+      handlers.runPreShift,
+    );
   }, 60_000);
   timers.push(clockTimer);
 

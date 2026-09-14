@@ -801,3 +801,18 @@ test.describe('sortByPriority — nearest expiry breaks a tie before placed-time
     expect(sortByPriority([noExpiry, withExpiry])).toEqual([withExpiry, noExpiry]);
   });
 });
+
+test.describe('pre-shift round — a real cycle fired before the afternoon shift starts (2026-09-14)', () => {
+  test('unset by default — 11:55 was given as an example, not a confirmed shift-start time', () => {
+    expect(config().preShiftRoundTime).toBeNull();
+  });
+
+  test('is configurable to the team’s real shift-start time', () => {
+    expect(config({ WAVE_ENGINE_PRE_SHIFT_TIME: '11:55' }).preShiftRoundTime).toBe('11:55');
+    expect(config({ WAVE_ENGINE_PRE_SHIFT_TIME: '12:30' }).preShiftRoundTime).toBe('12:30');
+  });
+
+  test('an unparseable time is dropped rather than silently misfiring all day', () => {
+    expect(config({ WAVE_ENGINE_PRE_SHIFT_TIME: 'not-a-time' }).preShiftRoundTime).toBeNull();
+  });
+});
