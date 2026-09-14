@@ -423,20 +423,59 @@ export function toDomainOrder(
     isReserved: reservedOrderIds.has(row.orderId),
     isBlockedPlatform: blockedPlatformOrderIds.has(row.orderId),
     orderTime: parseOrderTime(row.orderTimeRaw),
+    expiresAt: parseExpiryTime(row.orderTimeRaw),
   };
 }
 
+/** A single "DD MMM YYYY HH:mm" token, e.g. "11 ก.ย. 2026 20:36" — the shape both the placed-time and the Expire deadline share in the same cell. */
+const DATE_TIME_TOKEN = /(\d{1,2}\s+\S+\s+\d{4}\s+\d{1,2}:\d{2})/;
+
 /**
- * Reads the เวลา cell into a sortable timestamp.
+ * Reads the เวลา cell into a sortable timestamp for when the order was
+ * PLACED — not when it expires.
  *
- * The cell mixes an order time with an SLA countdown ("Expire 11 ก.ย. 2026
- * 12:00 หมดอายุใน 19 ชั่วโมง"), so the FIRST Thai date-time in it is taken as
- * the order's own. Returns null when nothing parses, and null sorts last —
- * a parse failure must never let an order jump the queue.
+ * The cell mixes that with an "Expire ..." SLA deadline in the same string
+ * ("Paid 11 ก.ย. 2026 20:36 Expire 12 ก.ย. 2026 23:59 หมดอายุใน 16 ชั่วโมง",
+ * confirmed live 2026-09-11), and `parseThaiDateTime` only matches a string
+ * that is EXACTLY one such token — nothing else. Passing the whole raw cell
+ * to it, which this function did until 2026-09-14, therefore failed to parse
+ * on every real row: orderTime was always null, "oldest order first" never
+ * actually sorted by anything, and orders fell back to whatever order the DOM
+ * scan happened to produce.
+ *
+ * The fix: split off anything from "Expire" onward first, so the Expire
+ * timestamp itself is never mistaken for the placed time, then take the
+ * first date-time token in what remains.
+ *
+ * Returns null when nothing parses, and null sorts last — a parse failure
+ * must never let an order jump the queue.
  */
 export function parseOrderTime(raw: string): number | null {
   if (!raw.trim()) return null;
-  const parsed = parseThaiDateTime(raw.trim());
+  const beforeExpiry = raw.split(/Expire/i)[0];
+  const match = beforeExpiry.match(DATE_TIME_TOKEN);
+  if (!match) return null;
+  const parsed = parseThaiDateTime(match[1]);
+  return parsed ? parsed.getTime() : null;
+}
+
+/**
+ * Reads the same เวลา cell's "Expire ..." deadline — the moment BigSeller
+ * auto-cancels the order if it is still unconfirmed. Requested 2026-09-14
+ * ("เรื่องคำสั่งซื้อ ที่มาก่อนและใกล้หมดอายุ") so an order close to this can
+ * jump its own tier's queue (see applyExpiryUrgency in tiers.ts) instead of
+ * waiting out a batch-size or truck-cutoff rule and losing the sale.
+ *
+ * Returns null when the cell carries no "Expire" label at all — not every
+ * order has one, and null must mean "no known deadline", not "expired".
+ */
+export function parseExpiryTime(raw: string): number | null {
+  if (!raw.trim()) return null;
+  const afterExpire = raw.match(/Expire([\s\S]*)/i);
+  if (!afterExpire) return null;
+  const match = afterExpire[1].match(DATE_TIME_TOKEN);
+  if (!match) return null;
+  const parsed = parseThaiDateTime(match[1]);
   return parsed ? parsed.getTime() : null;
 }
 

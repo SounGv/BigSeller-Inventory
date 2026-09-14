@@ -28,8 +28,10 @@ export interface ScannedOrder {
   isReserved: boolean;
   /** True when the order came from a platform this engine is not allowed to act on. Determined by platform-filter membership. */
   isBlockedPlatform: boolean;
-  /** Milliseconds since epoch for the order's เวลา cell, or null when unreadable. Oldest acts first within a priority. */
+  /** Milliseconds since epoch for the order's placed/paid timestamp, or null when unreadable. Oldest acts first within a priority. */
   orderTime: number | null;
+  /** Milliseconds since epoch for the "Expire ..." deadline in the same cell, or null when the cell carries none. Past this, the platform auto-cancels the order — see applyExpiryUrgency. */
+  expiresAt: number | null;
 }
 
 export interface DecisionContext {
@@ -152,9 +154,41 @@ function formatDateParts(year: number, month: number, day: number): string {
 export function classifyOrder(order: ScannedOrder, config: WaveEngineConfig, ctx: DecisionContext): Decision {
   return applyPlatformGuard(
     order,
-    applyReservedStoreGuard(order, applyWarehouseGuard(order, classifyByTier(order, config, ctx), config), config),
+    applyReservedStoreGuard(
+      order,
+      applyWarehouseGuard(order, applyExpiryUrgency(order, classifyByTier(order, config, ctx), config, ctx.now), config),
+      config,
+    ),
     config,
   );
+}
+
+/**
+ * An order the platform will auto-cancel if left unconfirmed past its own
+ * "หมดอายุใน ..." deadline loses the sale entirely — worse than any batching
+ * or truck-cutoff rule this engine otherwise honours. Requested 2026-09-14
+ * ("เรื่องคำสั่งซื้อ ที่มาก่อนและใกล้หมดอายุ"): inside `expiryUrgentMinutes` of
+ * that deadline, the order jumps its own tier's queue instead of waiting for
+ * a batch size, a truck cutoff, or the morning "wait for N" rule.
+ *
+ * Only promotes a `wait` decision. It does not reach into `flag_manual` or
+ * `skip` — those come from a hard fact (wrong warehouse, a reservation, a
+ * blocked platform, an unclassified courier) that being close to expiry does
+ * not change; a reservation about to expire is still not this engine's order
+ * to confirm. Applied BEFORE the warehouse/reserved/platform guards precisely
+ * so those guards still win over it.
+ */
+function applyExpiryUrgency(order: ScannedOrder, decision: Decision, config: WaveEngineConfig, now: Date): Decision {
+  if (decision.action !== 'wait' || order.expiresAt === null) return decision;
+  const minutesLeft = (order.expiresAt - now.getTime()) / 60000;
+  if (minutesLeft > config.expiryUrgentMinutes) return decision;
+  const readable = minutesLeft <= 0 ? 'already past its deadline' : `${Math.round(minutesLeft)} min left`;
+  return {
+    ...decision,
+    action: 'confirm_now',
+    priorityBoost: true,
+    reason: `URGENT_EXPIRING_SOON: ${readable} before this order auto-cancels (threshold ${config.expiryUrgentMinutes} min) — jumping ahead of "${decision.reason}"`,
+  };
 }
 
 /**
@@ -435,10 +469,14 @@ export function sortByPriority<T extends { decision: Decision; order?: ScannedOr
     if (a.decision.priorityBoost !== b.decision.priorityBoost) {
       return Number(b.decision.priorityBoost) - Number(a.decision.priorityBoost);
     }
-    // Oldest order first ("เวลาออเดอร์ที่มาก่อน"): within a priority the order
-    // that has been waiting longest is also the one closest to its deadline,
-    // which is what the 2-hour channel needs. Orders with no readable
-    // timestamp sort last rather than jumping the queue on a parse failure.
+    // Nearest to its own expiry deadline first — a real per-order fact, not an
+    // approximation. Only meaningful when both sides have one; either side
+    // missing it falls through to placed-time.
+    const expiryOf = (item: T) => item.order?.expiresAt ?? Number.POSITIVE_INFINITY;
+    if (expiryOf(a) !== expiryOf(b)) return expiryOf(a) - expiryOf(b);
+    // Oldest order first ("เวลาออเดอร์ที่มาก่อน"): the order that has been
+    // waiting longest goes next. Orders with no readable timestamp sort last
+    // rather than jumping the queue on a parse failure.
     const timeOf = (item: T) => item.order?.orderTime ?? Number.POSITIVE_INFINITY;
     return timeOf(a) - timeOf(b);
   });

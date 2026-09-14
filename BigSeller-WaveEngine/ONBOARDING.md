@@ -85,6 +85,20 @@ what makes the 13:00 restart correct for ส่งทันที: the backlog t
 stop has already burned part of its 2-hour SLA, so it clears before anything newer. An order
 whose timestamp cannot be read sorts to the back of its priority rather than being dropped.
 
+**Bug fixed 2026-09-14 — this never actually worked before today.** The เวลา cell's real shape is
+`"Paid 11 ก.ย. 2026 20:36 Expire 12 ก.ย. 2026 23:59 หมดอายุใน 16 ชั่วโมง"` — a placed time AND an
+Expire deadline in one string. The parser used to hand that WHOLE string to a function that only
+matches a single exact date-time token, so it failed on every real row: `orderTime` was always
+`null`, and "oldest first" silently did nothing — orders sorted however the DOM scan happened to
+list them. Fixed by splitting the placed time from the Expire deadline before parsing either one.
+
+**Close to expiring jumps the queue.** BigSeller auto-cancels an order left unconfirmed past its
+own Expire deadline — that loses the sale entirely, worse than any batching or truck-cutoff rule.
+An order inside `WAVE_ENGINE_EXPIRY_URGENT_MINUTES` (default 120, a guess — not a number anyone
+gave) of that deadline is confirmed now regardless of its tier's normal timing, sorted ahead of
+everything else in its tier. This override sits BELOW the warehouse/reserved/platform guards —
+those still win: a reservation about to expire is still never confirmed.
+
 **Priority order** (1 = most urgent) lives in `src/wave-engine/channel-policy.ts`:
 
 1. Express Delivery (SPX) — morning: wait for 10; from 13:00: any quantity
@@ -136,7 +150,7 @@ a picker walking between floors. They are logged for a human every time.
   batching window measures from.
 
 ```bash
-npm run test:unit     # 157 unit tests, no browser needed
+npm run test:unit     # 174 unit tests, no browser needed
 npx tsc --noEmit
 ```
 

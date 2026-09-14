@@ -13,6 +13,7 @@ import { assertScanIsComplete, extractDeliveryDateText, toScannedOrder } from '.
 import { minParcelsForWaveType, shouldWaveNow } from '../src/wave-engine/wave-state.js';
 import { isUnrecoverableBrowserError } from '../src/wave-engine/scheduler.js';
 import { floorForPosition, resolveSkuAliases, skusInProductCell } from '../src/wave-engine/sku-floor.js';
+import { parseExpiryTime, parseOrderTime } from '../src/wave-engine/wave-engine-service.js';
 
 /** Config built from an explicit env map so these tests never depend on the developer's own .env. */
 function config(overrides: Record<string, string> = {}): WaveEngineConfig {
@@ -31,6 +32,7 @@ function order(overrides: Partial<ScannedOrder> = {}): ScannedOrder {
     isReserved: false,
     isBlockedPlatform: false,
     orderTime: null,
+    expiresAt: null,
     ...overrides,
   };
 }
@@ -663,5 +665,139 @@ test.describe('a courier variant never inherits a rank from the name it sits ins
   test('an unranked Bulky courier stays unranked', () => {
     expect(resolveLogisticsChannel('Lazada-TH-Flash TH Bulky', config())).toBe('');
     expect(resolveLogisticsChannel('Shopee-TH-Flash Express', config())).toBe('');
+  });
+});
+
+
+test.describe('placed-time vs. Expire deadline — the real BigSeller cell shape', () => {
+  // Confirmed live 2026-09-11: "Paid 11 ก.ย. 2026 20:36 Expire 12 ก.ย. 2026
+  // 23:59 หมดอายุใน 16 ชั่วโมง". Until 2026-09-14, parseOrderTime handed this
+  // WHOLE string to a parser that only matches a single exact
+  // "DD MMM YYYY HH:mm" token — so every real order's orderTime was null and
+  // "oldest order first" never actually sorted anything.
+  const REAL_CELL = 'Paid 11 ก.ย. 2026 20:36 Expire 12 ก.ย. 2026 23:59 หมดอายุใน 16 ชั่วโมง';
+
+  test('parseOrderTime reads the PLACED time, not the Expire deadline', () => {
+    const ms = parseOrderTime(REAL_CELL);
+    expect(ms).not.toBeNull();
+    expect(new Date(ms!).toISOString()).toBe(new Date(2026, 8, 11, 20, 36).toISOString());
+  });
+
+  test('parseExpiryTime reads the Expire deadline, not the placed time', () => {
+    const ms = parseExpiryTime(REAL_CELL);
+    expect(ms).not.toBeNull();
+    expect(new Date(ms!).toISOString()).toBe(new Date(2026, 8, 12, 23, 59).toISOString());
+  });
+
+  test('a cell with no "Expire" label has a placed time but no expiry', () => {
+    expect(parseOrderTime('11 ก.ย. 2026 20:36')).not.toBeNull();
+    expect(parseExpiryTime('11 ก.ย. 2026 20:36')).toBeNull();
+  });
+
+  test('an unreadable cell returns null for both rather than guessing', () => {
+    expect(parseOrderTime('')).toBeNull();
+    expect(parseOrderTime('ไม่ทราบเวลา')).toBeNull();
+    expect(parseExpiryTime('')).toBeNull();
+  });
+});
+
+test.describe('an order close to its Expire deadline jumps its own tier’s queue (2026-09-14)', () => {
+  test('a wait decision is promoted to confirm_now inside the urgency window', () => {
+    const soon = new Date(AFTERNOON.getTime() + 30 * 60000); // expires in 30 min
+    const decision = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-SPX Express', expiresAt: soon.getTime() }),
+      config(),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(decision.action).toBe('confirm_now');
+    expect(decision.priorityBoost).toBe(true);
+    expect(decision.reason).toContain('URGENT_EXPIRING_SOON');
+    // The tier itself is unchanged — only the wait is overridden.
+    expect(decision.tier).toBe(6);
+  });
+
+  test('an order past its deadline is still promoted, worded as already expired', () => {
+    const past = new Date(AFTERNOON.getTime() - 5 * 60000);
+    const decision = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-SPX Express', expiresAt: past.getTime() }),
+      config(),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(decision.action).toBe('confirm_now');
+    expect(decision.reason).toContain('already past its deadline');
+  });
+
+  test('an order with plenty of time left still waits normally', () => {
+    const later = new Date(AFTERNOON.getTime() + 6 * 60 * 60000); // 6 hours out
+    const decision = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-SPX Express', expiresAt: later.getTime() }),
+      config(),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(decision.action).toBe('wait');
+  });
+
+  test('the threshold is configurable via WAVE_ENGINE_EXPIRY_URGENT_MINUTES', () => {
+    const in90 = new Date(AFTERNOON.getTime() + 90 * 60000);
+    const tight = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-SPX Express', expiresAt: in90.getTime() }),
+      config({ WAVE_ENGINE_EXPIRY_URGENT_MINUTES: '60' }),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(tight.action).toBe('wait'); // 90 min > 60 min threshold
+    const loose = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-SPX Express', expiresAt: in90.getTime() }),
+      config({ WAVE_ENGINE_EXPIRY_URGENT_MINUTES: '120' }),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(loose.action).toBe('confirm_now'); // 90 min <= 120 min threshold
+  });
+
+  test('a hard guard still wins over an expiring order — reserved stock is never confirmed', () => {
+    const soon = new Date(AFTERNOON.getTime() + 10 * 60000);
+    const decision = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-SPX Express', expiresAt: soon.getTime(), isReserved: true }),
+      config(),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(decision.action).toBe('skip');
+    expect(decision.reason).toContain('EXCLUDED_RESERVED_STORE');
+  });
+
+  test('a hard guard still wins over an expiring order — the wrong warehouse still needs a human', () => {
+    const soon = new Date(AFTERNOON.getTime() + 10 * 60000);
+    const decision = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-SPX Express', expiresAt: soon.getTime(), warehouse: 'STOCK_1' }),
+      config(),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(decision.action).toBe('flag_manual');
+    expect(decision.reason).toContain('GUARD_WRONG_WAREHOUSE');
+  });
+
+  test('an order that already confirms now is unaffected either way', () => {
+    const soon = new Date(AFTERNOON.getTime() + 10 * 60000);
+    const decision = classifyOrder(
+      order({ logisticsChannel: 'Shopee-TH-Instant Delivery', expiresAt: soon.getTime() }),
+      config(),
+      { now: AFTERNOON, channelPendingCounts: {} },
+    );
+    expect(decision.action).toBe('confirm_now');
+    expect(decision.reason).not.toContain('URGENT_EXPIRING_SOON');
+  });
+});
+
+test.describe('sortByPriority — nearest expiry breaks a tie before placed-time does', () => {
+  test('within the same tier and boost, the order expiring soonest goes first', () => {
+    const far = { decision: { tier: 6 as const, action: 'wait' as const, reason: '', batchable: true, priorityBoost: false }, order: order({ orderTime: 1000, expiresAt: 9_000_000 }) };
+    const near = { decision: { tier: 6 as const, action: 'wait' as const, reason: '', batchable: true, priorityBoost: false }, order: order({ orderTime: 2000, expiresAt: 1_000_000 }) };
+    // `near` was placed LATER but expires SOONER — expiry must win the tie.
+    expect(sortByPriority([far, near])).toEqual([near, far]);
+  });
+
+  test('an order with no known expiry falls back to placed-time', () => {
+    const noExpiry = { decision: { tier: 6 as const, action: 'wait' as const, reason: '', batchable: true, priorityBoost: false }, order: order({ orderTime: 500, expiresAt: null }) };
+    const withExpiry = { decision: { tier: 6 as const, action: 'wait' as const, reason: '', batchable: true, priorityBoost: false }, order: order({ orderTime: 999, expiresAt: 5_000_000 }) };
+    expect(sortByPriority([noExpiry, withExpiry])).toEqual([withExpiry, noExpiry]);
   });
 });

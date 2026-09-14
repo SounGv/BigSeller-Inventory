@@ -58,6 +58,17 @@ export interface WaveEngineConfig {
    * wave, and persisted, so one-shot runs batch the same way a daemon does.
    */
   waveIntervalMinutes: number;
+  /**
+   * An order the platform will auto-cancel if it sits unconfirmed past its own
+   * "หมดอายุใน ..." deadline loses the sale entirely — worse than any batching
+   * or truck-cutoff rule this engine otherwise honours. Requested 2026-09-14
+   * ("เรื่องคำสั่งซื้อ ที่มาก่อนและใกล้หมดอายุ"): inside this many minutes of
+   * that deadline, an order jumps its own tier's queue instead of waiting.
+   *
+   * Default is a guess (2 hours), not a number anyone gave — confirm or
+   * change it before relying on it.
+   */
+  expiryUrgentMinutes: number;
 }
 
 export const SELLER_DELIVERY_CHANNEL = 'Seller Delivery';
@@ -164,5 +175,6 @@ export function loadWaveEngineConfig(env: NodeJS.ProcessEnv = process.env): Wave
     minParcelsSingleType: Number(env.WAVE_ENGINE_MIN_PARCELS_SINGLE ?? 50),
     minParcelsMultiType: Number(env.WAVE_ENGINE_MIN_PARCELS_MULTI ?? 20),
     waveIntervalMinutes: Number(env.WAVE_ENGINE_WAVE_INTERVAL_MINUTES ?? 30),
+    expiryUrgentMinutes: Number(env.WAVE_ENGINE_EXPIRY_URGENT_MINUTES ?? 120),
   };
 }
