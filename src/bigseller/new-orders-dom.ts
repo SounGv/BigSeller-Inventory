@@ -108,6 +108,32 @@ export async function goToNextOrderPage(page: Page): Promise<boolean> {
 }
 
 /**
+ * The pagination bar's own row total ("1 - 50 of 50", "1 - 300 of 387") —
+ * the actual count of rows the table itself has, straight from BigSeller's
+ * rendering of the list.
+ *
+ * Confirmed live 2026-09-15: this can DISAGREE with a filter row's own pill
+ * badge — LockStock's badge read 51 while a scan of the actual table (and
+ * this bar) both agreed on 50. The badge is a separately-cached count that
+ * can lag; this bar reflects what is actually in the table right now, which
+ * is what an exclusion-list scan needs to match.
+ *
+ * `.pagination` renders twice on this page (a confirmed duplicate — see
+ * setMaxPageSize above), so only the first is read. Returns undefined when no
+ * pagination bar is present (an empty list has none) or its text does not
+ * parse, so a caller must decide what "unreadable" means for its own check.
+ */
+export async function readPaginationTotal(page: Page): Promise<number | undefined> {
+  const text = await page
+    .locator('.pagination')
+    .first()
+    .textContent()
+    .catch(() => null);
+  const match = (text ?? '').replace(/\s+/g, ' ').match(/of\s+(\d[\d,]*)/i);
+  return match ? Number(match[1].replace(/,/g, '')) : undefined;
+}
+
+/**
  * Collects every `table.list_items` row reachable on the CURRENT pagination
  * page by scrolling down repeatedly and re-reading the DOM between scrolls,
  * deduping by `data-orderid`.

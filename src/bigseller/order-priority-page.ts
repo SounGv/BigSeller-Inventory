@@ -8,6 +8,7 @@ import {
   ORDER_COLUMN,
   readFilterPillCount,
   readFilterPills,
+  readPaginationTotal,
   readWarehouseFilterOptions,
   selectFilterPill,
   waitForListSettled,
@@ -191,27 +192,46 @@ export class BigSellerOrderPriorityPage {
     readCount: () => Promise<number | undefined>,
     attempts = 3,
   ): Promise<ScannedOrderRow[]> {
-    let lastError: unknown;
+    // Checked against the TABLE'S OWN pagination total ("1 - 50 of 50"), not
+    // just the filter row's pill badge — confirmed live 2026-09-15 that the
+    // two can disagree (LockStock's badge read 51 while both the table and
+    // its own pagination bar agreed on 50). The badge is a separately-cached
+    // count that can lag; the pagination bar is what the table actually has
+    // right now, which is the only number an exclusion scan can honestly be
+    // checked against. Still exact — an excluded order missing from this list
+    // would look eligible either way — just checked against the right ground
+    // truth. A few attempts remain in case the table itself is genuinely
+    // still moving (a reservation opened/converted mid-scan).
+    let lastNote = '';
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      try {
-        return await this.scanOrders({
-          depth: 'full',
-          warehouseScope: params.warehouseScope,
-          expectedCount: await readCount(),
-          completeness: 'exact',
-        });
-      } catch (error) {
-        lastError = error;
-        if (attempt === attempts) throw error;
-        await logger.warn(
-          `wave-engine: exclusion scan attempt ${attempt}/${attempts} came up short — likely the queue moved mid-scan, ` +
-            `re-reading and trying again: ${(error as Error).message}`,
-        );
-        await humanDelay(800, 1500);
+      const badgeCount = await readCount();
+      const rows = await this.scanOrders({ depth: 'full', warehouseScope: params.warehouseScope });
+      const tableTotal = await readPaginationTotal(this.page);
+      const trustedTotal = tableTotal ?? badgeCount;
+
+      if (trustedTotal === undefined || rows.length >= trustedTotal) {
+        if (tableTotal !== undefined && badgeCount !== undefined && tableTotal !== badgeCount) {
+          await logger.warn(
+            `wave-engine: filter badge (${badgeCount}) and the table's own pagination (${tableTotal}) disagree — ` +
+              `trusted the table, which the scan (${rows.length} row(s)) matches`,
+          );
+        }
+        return rows;
       }
+
+      lastNote =
+        `collected ${rows.length} row(s) but the filter badge reports ${badgeCount ?? '?'} ` +
+        `and the table's own pagination reports ${tableTotal ?? '?'}`;
+      if (attempt === attempts) {
+        throw new Error(`Exclusion scan is incomplete: ${lastNote}. Refusing to act — every order missing from this list would be treated as eligible.`);
+      }
+      await logger.warn(
+        `wave-engine: exclusion scan attempt ${attempt}/${attempts} came up short (${lastNote}) — re-reading and trying again`,
+      );
+      await humanDelay(800, 1500);
     }
     // Unreachable — the loop above always returns or throws — but keeps TS happy.
-    throw lastError;
+    throw new Error(`Exclusion scan is incomplete: ${lastNote}`);
   }
 
   async collectStoreOrderIds(storeName: string): Promise<Set<string>> {
