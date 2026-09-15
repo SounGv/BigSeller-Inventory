@@ -208,6 +208,14 @@ async function runBulkLoop(page: Page, config: ReturnType<typeof loadWaveEngineC
   let stopping = false;
   await logger.info(`wave-engine [bulk-loop]: repeating --bulk every ~${minutes} min. Press Ctrl+C to stop.`);
 
+  // checkIsLoggedIn fetches a RELATIVE url from inside the page, so it only
+  // works once the page is actually on a bigseller.com origin — a fresh
+  // context.newPage() starts on about:blank. One navigation up front (before
+  // the loop's own login check ever runs) is what makes that check safe.
+  // Confirmed live 2026-09-15: skipping this threw "Failed to parse URL from
+  // /api/v1/isLogin.json" on the very first tick.
+  await ensureSessionValid(page, NEW_ORDERS_URL);
+
   const stop = () => {
     stopping = true;
   };
