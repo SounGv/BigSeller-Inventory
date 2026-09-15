@@ -172,14 +172,52 @@ export class BigSellerOrderPriorityPage {
    * Resets the store filter to ทั้งหมด afterwards so the caller's own scan is
    * not silently narrowed.
    */
+  /**
+   * A live queue that reservations are actively being opened/converted in
+   * makes a single full scan of an exclusion list race the count it is
+   * checked against — the exact match `assertScanIsComplete('exact')` demands
+   * is still right (an excluded order missing from this set would look
+   * eligible), but a MOMENTARY off-by-a-few during a live day should get a
+   * fresh look, not an aborted cycle. Confirmed live 2026-09-15: the LockStock
+   * exclusion scan came up short by exactly 1 row on back-to-back urgent
+   * ticks while orders were flowing in continuously.
+   *
+   * Re-reads the count fresh on every attempt — the count itself is what
+   * moved, not just the scan going stale — and only gives up (letting the
+   * exact assertion throw for real) after every attempt has failed.
+   */
+  private async scanExactWithRetry(
+    params: { warehouseScope?: string },
+    readCount: () => Promise<number | undefined>,
+    attempts = 3,
+  ): Promise<ScannedOrderRow[]> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await this.scanOrders({
+          depth: 'full',
+          warehouseScope: params.warehouseScope,
+          expectedCount: await readCount(),
+          completeness: 'exact',
+        });
+      } catch (error) {
+        lastError = error;
+        if (attempt === attempts) throw error;
+        await logger.warn(
+          `wave-engine: exclusion scan attempt ${attempt}/${attempts} came up short — likely the queue moved mid-scan, ` +
+            `re-reading and trying again: ${(error as Error).message}`,
+        );
+        await humanDelay(800, 1500);
+      }
+    }
+    // Unreachable — the loop above always returns or throws — but keeps TS happy.
+    throw lastError;
+  }
+
   async collectStoreOrderIds(storeName: string): Promise<Set<string>> {
     await selectFilterPill(this.page, 'ร้านค้า', storeName);
     try {
-      const rows = await this.scanOrders({
-        depth: 'full',
-        expectedCount: await readFilterPillCount(this.page, 'ร้านค้า', storeName),
-        completeness: 'exact',
-      });
+      const rows = await this.scanExactWithRetry({}, () => readFilterPillCount(this.page, 'ร้านค้า', storeName));
       await logger.info(`wave-engine: store "${storeName}" holds ${rows.length} order(s) — excluded from all actions`);
       return new Set(rows.map((row) => row.orderId));
     } finally {
@@ -218,12 +256,10 @@ export class BigSellerOrderPriorityPage {
     try {
       for (const pill of blocked) {
         await selectFilterPill(this.page, 'แพลตฟอร์ม', pill.label);
-        const expectedCount = pill.count ?? (await readFilterPillCount(this.page, 'แพลตฟอร์ม', pill.label));
-        for (const row of await this.scanOrders({ depth: 'full', expectedCount, completeness: 'exact' })) {
-          ids.add(row.orderId);
-        }
+        const rows = await this.scanExactWithRetry({}, () => readFilterPillCount(this.page, 'แพลตฟอร์ม', pill.label));
+        for (const row of rows) ids.add(row.orderId);
         await logger.warn(
-          `wave-engine: platform "${pill.label}" holds ${pill.count} order(s) — outside ${allowedPlatforms.join('/')}, excluded from all actions`,
+          `wave-engine: platform "${pill.label}" holds ${rows.length} order(s) — outside ${allowedPlatforms.join('/')}, excluded from all actions`,
         );
       }
     } finally {
