@@ -137,8 +137,14 @@ those still win: a reservation about to expire is still never confirmed.
 4. BEST Express + DHL Domestic — the only pair allowed to share a wave
 5-12. LEX TH → SPX Express → TikTok J&T → TikTok Flash → Lazada Flash → SPX(TH) → KEX → Flash Bulky
 
-Channels 4-12 wait for their platform's truck: **Shopee 16:01, Lazada 13:01, TikTok 14:01**,
-read from the channel's own name prefix.
+**Corrected 2026-09-15 — these are deadlines, not start times.** Channels 4-12 confirm+wave as
+soon as 20 orders pile up, **any time of day** — the platform truck times (**Shopee 16:01, Lazada
+13:01, TikTok 14:01**, read from the channel's own name prefix) are the courier's own cutoff for
+still *accepting* parcels that day ("ตัดรอบรับงาน"), not a clock this engine should wait for
+before confirming anything. Waiting until the truck time was the earlier (wrong) design — it sat
+on hundreds of ready-to-wave orders all day doing nothing. Now: batch until 20, go immediately;
+if the batch still hasn't filled by the truck time, send whatever is left anyway rather than miss
+that day's pickup.
 
 **Wave sizing.** One wave is one picking trip to one floor, so a wave is only created once
 it is worth the trip: **50 parcels for single-SKU rows, 20 for multi-SKU rows**. Short loads

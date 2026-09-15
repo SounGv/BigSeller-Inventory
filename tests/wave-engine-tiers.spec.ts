@@ -202,8 +202,8 @@ test.describe('the 12-channel priority order (user, 2026-09-11)', () => {
     const policies = config().channelPolicies;
     for (const label of ['TikTok-TH-BEST Express', 'Shopee-TH-DHL Domestic']) {
       const rule = policies[label].rule;
-      expect(rule.kind).toBe('platform_cutoff');
-      if (rule.kind === 'platform_cutoff') expect(rule.cutoff).toBe('14:01');
+      expect(rule.kind).toBe('batch_then_immediate');
+      if (rule.kind === 'batch_then_immediate') expect(rule.immediateFrom).toBe('14:01');
     }
   });
 });

@@ -392,8 +392,7 @@ async function scanEverything(
  */
 function isPastTrigger(rule: WaveEngineConfig['channelPolicies'][string]['rule'], nowHhMm: string): boolean {
   if (rule.kind === 'instant') return true;
-  if (rule.kind === 'batch_then_immediate') return nowHhMm >= rule.immediateFrom;
-  return nowHhMm >= rule.cutoff;
+  return nowHhMm >= rule.immediateFrom;
 }
 
 /** Waiting-order count per resolved channel — the input the morning batch rule needs. */

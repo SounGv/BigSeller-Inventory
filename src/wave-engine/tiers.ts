@@ -360,24 +360,12 @@ function classifyByTier(order: ScannedOrder, config: WaveEngineConfig, ctx: Deci
     };
   }
 
-  // platform_cutoff — rides its platform's truck, so it waits for that time
-  // and then everything accumulated goes out together.
-  if (nowHhMm >= rule.cutoff) {
-    return {
-      tier: priority,
-      action: 'confirm_now',
-      reason: `CONFIRM_P${priority}_CUTOFF: ${nowHhMm} >= truck cutoff ${rule.cutoff}`,
-      batchable: true,
-      priorityBoost: boost,
-    };
-  }
-  return {
-    tier: priority,
-    action: 'wait',
-    reason: `WAIT_P${priority}_BEFORE_CUTOFF: ${nowHhMm} < truck cutoff ${rule.cutoff}`,
-    batchable: true,
-    priorityBoost: boost,
-  };
+  // Exhaustive over ChannelRule's two kinds (batch_then_immediate, instant) —
+  // both handled and returned above. A third kind added later without
+  // updating this function would land here; fail loudly rather than fall
+  // through to a silent default.
+  const exhaustive: never = rule;
+  throw new Error(`classifyByTier: unhandled rule kind ${JSON.stringify(exhaustive)}`);
 }
 
 function classifySellerDelivery(
