@@ -51,12 +51,32 @@ Never commit `.env`, `secrets/`, or `playwright/.auth/`. They are gitignored; ke
 | `npm run wave-engine -- --zones` | Which FLOOR each channel's orders pick from, and which orders span both | No — ~4 min |
 | `npm run wave-engine -- --expiring` | Every order still open, soonest-to-expire first, split into "inside the urgent window" vs the rest | No — ~2-4 min |
 | `npm run wave-engine -- --bulk` | One courier at a time: filter to it, check the target is met, press BigSeller's own ยืนยัน button, then wave it | Only if live priorities are set |
+| `npm run wave-engine -- --bulk-loop` | Repeats `--bulk` on a timer (~4 min default) instead of running as a daemon | Only if live priorities are set |
 | `npm run wave-engine -- --once` | One full cycle: scan, decide, log | Only if live priorities are set |
 | `npm run wave-engine -- --fast` | Same, but acts on the single highest-priority carrier — ~20s instead of ~2 min | Only if live priorities are set |
 | `npm run wave-engine` | Daemon: urgent loop every ~3 min, main loop every ~12 min, plus the pre-shift trigger below if set | Only if live priorities are set |
 
 Start with `--board`. It answers "what do I confirm first" without reading a single row,
 because BigSeller already counts the queue for you.
+
+---
+
+**Filter to what's needed, don't scan everything — remember this before adding a new mode.**
+Instructed 2026-09-15, pointing straight at the numbers on the order page's own filter row:
+"ให้กรองที่วงให้ ไม่ต้องเสียเวลาสแกนทั้งหมด แค่ดูคอลัมน์ที่วงให้" (filter to what's circled —
+don't waste time scanning everything, just read the columns that were circled). The circled
+columns were: the แพลตฟอร์ม / โลจิสติกส์ / คลังสินค้า filter row **badges**, the ยืนยัน button, the
+รอยืนยัน / กำลังยืนยัน / ยืนยันล้มเหลว / ของขาด counters beside it, and the เวลาหมดอายุ sort.
+
+This is why `--bulk` and `--bulk-loop` are fast (~10-20s a round) while the plain daemon
+(`npm run wave-engine`, no flag) is not: the daemon confirms one ROW at a time, so it has to
+know each individual order's id — which means enumerating every LockStock and blocked-platform
+order by name, a real scan. `--bulk` instead clicks BigSeller's own ยืนยัน button once per
+courier, so it only ever needs a **count** to know a reservation or blocked platform sits inside
+the current filter — the same badges a person glances at before clicking. **Prefer `--bulk` /
+`--bulk-loop` over the plain daemon whenever the choice is open** — reach for a full scan
+(`--once`, `--fast`, the daemon) only when something genuinely needs a specific order's own id,
+not merely "is this filter clear to click."
 
 ---
 

@@ -44,13 +44,14 @@ async function main(): Promise<void> {
   const fast = args.includes('--fast');
   const zones = args.includes('--zones');
   const bulk = args.includes('--bulk');
+  const bulkLoop = args.includes('--bulk-loop');
   const expiring = args.includes('--expiring');
   const dumpLimit = Number(args.find((arg) => /^\d+$/.test(arg)) ?? 5);
 
   const config = loadWaveEngineConfig();
   assertStorageStateExists();
 
-  const mode = expiring ? 'expiring' : bulk ? 'bulk' : zones ? 'zones' : board ? 'board' : waveDryRun ? 'wave-dry-run' : dump ? 'dump' : fast ? 'fast' : once ? 'once' : 'daemon';
+  const mode = bulkLoop ? 'bulk-loop' : expiring ? 'expiring' : bulk ? 'bulk' : zones ? 'zones' : board ? 'board' : waveDryRun ? 'wave-dry-run' : dump ? 'dump' : fast ? 'fast' : once ? 'once' : 'daemon';
   await logger.info(
     `wave-engine: starting (mode=${mode}) ` +
       `live_priorities=${[...config.livePriorities].join(',') || 'none (full dry run)'} urgent=${config.urgentLoopMinutes}min main=${config.mainLoopMinutes}min ` +
@@ -101,6 +102,11 @@ async function main(): Promise<void> {
 
     if (bulk) {
       await runBulkRound(page, config);
+      return;
+    }
+
+    if (bulkLoop) {
+      await runBulkLoop(page, config);
       return;
     }
 
@@ -179,6 +185,59 @@ async function main(): Promise<void> {
  * orders are Seller Delivery, so any other courier's filter excludes them by
  * construction rather than by the bot remembering to.
  */
+/**
+ * `--bulk-loop`: repeats `--bulk` on a timer instead of a daemon that scans
+ * every excluded order by name.
+ *
+ * Requested 2026-09-15 ("ให้กรองที่วงให้ไม่ต้องเสียเวลาสแกนทั้งหมด แค่ดู
+ * คอลัมน์ที่วงให้") — the plain daemon (`npm run wave-engine`, no flag) has
+ * to enumerate every LockStock and blocked-platform ORDER ID because it
+ * confirms one row at a time, so it cannot skip that full scan. `--bulk`
+ * clicks BigSeller's own ยืนยัน button once per courier, so it only ever
+ * needs a COUNT to know a reservation or a blocked platform is inside the
+ * current filter — the same badges a person glances at, never a row scan.
+ * That is what makes it fast enough to repeat every few minutes instead of
+ * running as a long-lived process.
+ *
+ * Same lock as every other live mode, held for the loop's whole life — one
+ * courier is confirmed per tick (runBulkRound's own one-per-round rule), then
+ * it waits out the interval and looks again with a fresh scan.
+ */
+async function runBulkLoop(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
+  const minutes = Number(process.env.WAVE_ENGINE_BULK_LOOP_MINUTES ?? 4);
+  let stopping = false;
+  await logger.info(`wave-engine [bulk-loop]: repeating --bulk every ~${minutes} min. Press Ctrl+C to stop.`);
+
+  const stop = () => {
+    stopping = true;
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+
+  while (!stopping) {
+    if (!(await checkIsLoggedIn(page))) {
+      await logger.error(
+        'wave-engine [bulk-loop]: session expired — stopping. A human must run "npm run login:bigseller" (and keep "npm run keep-alive" running), then restart this.',
+      );
+      break;
+    }
+    try {
+      await runBulkRound(page, config);
+    } catch (error) {
+      await logger.error(`wave-engine [bulk-loop]: round failed: ${(error as Error).message}`);
+    }
+    // ±25s jitter, same reasoning as the daemon's own loops: never fire on an
+    // exact fixed cadence against BigSeller.
+    const jitterMs = (Math.random() * 2 - 1) * 25_000;
+    const delayMs = Math.max(30_000, minutes * 60_000 + jitterMs);
+    await logger.info(`wave-engine [bulk-loop]: next round in ${Math.round(delayMs / 1000)}s`);
+    for (let waited = 0; waited < delayMs && !stopping; waited += 1000) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1000, delayMs - waited)));
+    }
+  }
+  await logger.info('wave-engine [bulk-loop]: stopped');
+}
+
 async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
   await ensureSessionValid(page, NEW_ORDERS_URL);
   const priorityPage = new BigSellerOrderPriorityPage(page);
