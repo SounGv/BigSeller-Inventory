@@ -248,6 +248,18 @@ export class BigSellerOrderPriorityPage {
     }
   }
 
+  // Tried a "skip the reserved-store scan, just check its pill under each
+  // allowed platform" shortcut on 2026-09-15 — LockStock never appears under
+  // Shopee/Lazada/TikTok (confirmed live: sums of sub-store pills under a
+  // platform match that platform's own total exactly), so it looked like a
+  // safe way to avoid a full scan. Measured SLOWER in practice (65.6s vs
+  // collectStoreOrderIds's 58.6s): the real cost here is BigSeller's own
+  // page-settle wait after each filter click, not the number of rows read,
+  // and this shortcut needed 4 filter switches (3 platforms + a restore)
+  // against collectStoreOrderIds's 2 (select + restore). Removed rather than
+  // kept as unused dead code — the finding is recorded here in case someone
+  // is tempted to try the same idea again.
+
   /**
    * Order ids from platforms this engine may not act on.
    *

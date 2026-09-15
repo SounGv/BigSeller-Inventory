@@ -76,6 +76,13 @@ export async function runCycle(
 
   // Collected BEFORE any other filter narrows the list, so the exclusion set is
   // complete rather than "reservations that happen to also match this scan".
+  //
+  // Tried skipping this on 2026-09-15 (LockStock never appears under Shopee/
+  // Lazada/TikTok, confirmed live) in favour of a cheap 3-platform pill check
+  // — measured SLOWER in practice (65.6s vs 58.6s): the real cost here is
+  // BigSeller's own page-settle wait after each filter click, not the row
+  // scan, and the "cheap" check needed 4 filter switches (3 platforms + a
+  // restore) against this one's 2 (select + restore). Kept as-is.
   const reservedOrderIds = await priorityPage.collectStoreOrderIds(config.reservedStore).catch(async (error: Error) => {
     // Fail closed: without this set the engine cannot tell a reservation from a
     // real order, and confirming a reservation ships stock a salesperson is
@@ -222,6 +229,12 @@ export async function runFastCycle(
   // queue's, so the check could never have been a safe basis for skipping
   // the scan — and its log line wrongly implied 60 reservations sat inside a
   // 3-order scope. Reservations are never confirmed on a guess.
+  //
+  // A second attempt on 2026-09-15 tried a cheap 3-platform pill check
+  // instead (LockStock never appears under Shopee/Lazada/TikTok, confirmed
+  // live) — measured SLOWER than this full scan (65.6s vs 58.6s), because
+  // the real cost is BigSeller's page-settle wait per filter click, not rows
+  // read. Kept as-is.
   const reservedOrderIds = await priorityPage.collectStoreOrderIds(config.reservedStore);
   await priorityPage.selectLogisticsFilter(target.pill.label);
 
