@@ -202,23 +202,33 @@ async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngine
   const lines: string[] = ['', `=== รอบยืนยันรวม (${nowHhMm}) ===`];
   let acted = false;
 
+  // Every line here also goes through logger.info, on top of the console
+  // table below — the console output only ever reaches whoever's terminal
+  // ran the command, and on 2026-09-15 that left a bulk round's own decisions
+  // (which courier it looked at, why it skipped one) completely invisible in
+  // logs/, with nothing to check afterwards beyond "did it crash or not".
+  const note = (text: string) => {
+    lines.push(text);
+    void logger.info(`wave-engine [bulk]: ${text.trim()}`);
+  };
+
   for (const { pill, channel, policy } of candidates) {
     const count = pill.count ?? 0;
     const live = config.livePriorities.has(policy!.priority);
     const target = config.minParcelsMultiType;
 
     if (count < target) {
-      lines.push(`  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ — ยังไม่ถึงเป้า ${target} ใบ ข้ามไปก่อน`);
+      note(`  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ — ยังไม่ถึงเป้า ${target} ใบ ข้ามไปก่อน`);
       continue;
     }
     if (!live) {
-      lines.push(
+      note(
         `  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ ครบเป้าแล้ว — แต่ลำดับนี้ยังไม่ได้เปิดโหมดทำงานจริง ไม่กด`,
       );
       continue;
     }
 
-    lines.push(`  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ ครบเป้า — ยืนยันรวมแล้วสร้าง Wave`);
+    note(`  ลำดับ ${policy!.priority}  ${pill.label}: ${count} ใบ ครบเป้า — ยืนยันรวมแล้วสร้าง Wave`);
     await priorityPage.selectLogisticsFilter(pill.label);
     const result = await priorityPage.bulkConfirmFiltered({
       expectedCourier: pill.label,
@@ -226,8 +236,7 @@ async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngine
       reservedStore: config.reservedStore,
       maxOrders: Number(process.env.WAVE_ENGINE_MAX_LIVE_CONFIRMS ?? count),
     });
-    lines.push(`           ยืนยัน ${result.confirmed} ใบ — ${result.note}`);
-    await logger.info(`wave-engine [bulk] ${pill.label}: confirmed ${result.confirmed} — ${result.note}`);
+    note(`           ยืนยัน ${result.confirmed} ใบ — ${result.note}`);
 
     if (result.confirmed > 0) {
       const wavePage = new BigSellerGenerateWavePage(page);
@@ -235,7 +244,7 @@ async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngine
       const tree = await wavePage.readLogisticsTree();
       const carrier = tree.find((node) => !node.isGroup && resolveLogisticsChannel(node.title, config) === channel);
       if (!carrier) {
-        lines.push('           หาขนส่งเจ้านี้ในหน้าสร้าง Wave ไม่เจอ — ยังไม่ได้สร้าง Wave');
+        note('           หาขนส่งเจ้านี้ในหน้าสร้าง Wave ไม่เจอ — ยังไม่ได้สร้าง Wave');
       } else {
         const wave = await wavePage.createWave(
           { title: carrier.title, group: carrier.group },
@@ -248,9 +257,9 @@ async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngine
               }).min,
           },
         );
-        lines.push(`           Wave: ${wave.created ? 'สร้างแล้ว' : 'ไม่ได้สร้าง'} — ${wave.note}`);
+        note(`           Wave: ${wave.created ? 'สร้างแล้ว' : 'ไม่ได้สร้าง'} — ${wave.note}`);
         for (const row of wave.rows) {
-          lines.push(`             โซน ${row.zone} · ${row.parcelCount} พัสดุ · ${row.itemCount} ชิ้น`);
+          note(`             โซน ${row.zone} · ${row.parcelCount} พัสดุ · ${row.itemCount} ชิ้น`);
         }
       }
       await wavePage
@@ -266,7 +275,7 @@ async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngine
     break;
   }
 
-  if (!acted) lines.push('  (ยังไม่มีขนส่งเจ้าไหนที่ครบเป้าและเปิดโหมดทำงานจริงไว้)');
+  if (!acted) note('  (ยังไม่มีขนส่งเจ้าไหนที่ครบเป้าและเปิดโหมดทำงานจริงไว้)');
   lines.push('');
   console.log(lines.join('\n'));
   await priorityPage.resetAllFilters();
