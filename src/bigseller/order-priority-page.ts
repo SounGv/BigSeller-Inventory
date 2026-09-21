@@ -19,7 +19,7 @@ import {
 } from './new-orders-dom.js';
 import { humanDelay } from '../utils/human-delay.js';
 import { logger } from '../utils/logger.js';
-import { SELLER_DELIVERY_CHANNEL } from '../wave-engine/config.js';
+import { parseOptionalNumber, SELLER_DELIVERY_CHANNEL } from '../wave-engine/config.js';
 
 /** One order's priority-relevant fields, as read off the page (spec §3). Raw text is kept so an unparsed field is diagnosable from the dry-run log instead of guessed at. */
 /**
@@ -76,10 +76,19 @@ const URGENT_TEXT_SIGNALS = ['ด่วนพิเศษ', 'ด่วน'];
 /** BigSeller order ids are its own internal numeric ids; anything else must never reach a CSS attribute selector. */
 const SAFE_ORDER_ID = /^[A-Za-z0-9_-]+$/;
 
-/** How long to wait for BigSeller to reflect a confirmation. Generous on purpose — see confirmOrder. */
-const CONFIRM_VERIFY_TIMEOUT_MS = Number(process.env.WAVE_ENGINE_CONFIRM_VERIFY_MS ?? 30000);
+/**
+ * How long to wait for BigSeller to reflect a confirmation. Generous on
+ * purpose — see confirmOrder. `parseOptionalNumber`, not `Number(x ?? y)` —
+ * the same class of bug found 2026-09-21 in every WAVE_ENGINE_* numeric
+ * setting: a blank .env line is an empty string, not undefined, so `?? y`
+ * never applies and `Number('')` is 0. A 0ms timeout here would make the
+ * verify loop below run zero iterations, reporting every real confirmation
+ * as UNVERIFIED even when it landed — the exact failure this timeout was
+ * lengthened (from 8s) to prevent in the first place.
+ */
+const CONFIRM_VERIFY_TIMEOUT_MS = parseOptionalNumber(process.env.WAVE_ENGINE_CONFIRM_VERIFY_MS, 30000);
 /** A bulk confirm runs server-side across a whole filtered set, so it needs longer than a single row's. */
-const BULK_CONFIRM_TIMEOUT_MS = Number(process.env.WAVE_ENGINE_BULK_CONFIRM_MS ?? 120000);
+const BULK_CONFIRM_TIMEOUT_MS = parseOptionalNumber(process.env.WAVE_ENGINE_BULK_CONFIRM_MS, 120000);
 
 /**
  * Page Object for the wave-engine's read of `order/index.htm?status=new`:
