@@ -6,7 +6,7 @@ import { NEW_ORDERS_URL, readFilterPills } from '../src/bigseller/new-orders-dom
 import { BigSellerOrderPriorityPage } from '../src/bigseller/order-priority-page.js';
 import { launchBigSellerBrowser } from '../src/utils/browser-runner.js';
 import { logger } from '../src/utils/logger.js';
-import { loadWaveEngineConfig, parseOptionalCap, SELLER_DELIVERY_CHANNEL } from '../src/wave-engine/config.js';
+import { loadWaveEngineConfig, parseOptionalCap, parseOptionalNumber, SELLER_DELIVERY_CHANNEL } from '../src/wave-engine/config.js';
 import { PLATFORM_CUTOFF } from '../src/wave-engine/channel-policy.js';
 import { DecisionLog } from '../src/wave-engine/decision-log.js';
 import { startScheduler } from '../src/wave-engine/scheduler.js';
@@ -204,7 +204,7 @@ async function main(): Promise<void> {
  * it waits out the interval and looks again with a fresh scan.
  */
 async function runBulkLoop(page: Page, config: ReturnType<typeof loadWaveEngineConfig>): Promise<void> {
-  const minutes = Number(process.env.WAVE_ENGINE_BULK_LOOP_MINUTES ?? 4);
+  const minutes = parseOptionalNumber(process.env.WAVE_ENGINE_BULK_LOOP_MINUTES, 4);
   let stopping = false;
   await logger.info(`wave-engine [bulk-loop]: repeating --bulk every ~${minutes} min. Press Ctrl+C to stop.`);
 

@@ -123,6 +123,35 @@ export function parseOptionalCap(raw: string | undefined): number {
   return Number.isFinite(value) && value >= 0 ? value : Number.POSITIVE_INFINITY;
 }
 
+/**
+ * Every OTHER numeric setting below this point (`WAVE_ENGINE_*` minutes,
+ * seconds, parcel thresholds) used the exact same broken shape as
+ * `MAX_LIVE_CONFIRMS` — `Number(env.X ?? default)` — until 2026-09-21. `??`
+ * only substitutes `default` for `null`/`undefined`, never for the EMPTY
+ * STRING `.env`'s blank form (`KEY=`) actually produces, and `Number('')` is
+ * `0`, not `NaN`. Left blank (arguably the most likely way anyone touches
+ * this file — clearing a value to "go back to default"), every one of these
+ * would have silently become 0 instead of its documented default:
+ *  - `minParcelsSingleType` / `minParcelsMultiType` = 0 → any single parcel
+ *    "reaches" the threshold, directly against the standing rule
+ *    ("จำนวนน้อยอย่าสร้างนะ" — never create a small wave).
+ *  - `waveIntervalMinutes` = 0 → the 30-minute batching window collapses to
+ *    none, so a short load waves immediately instead of collecting first.
+ *  - `urgentLoopMinutes` / `mainLoopMinutes` = 0 → clamped to a 30s floor by
+ *    `nextDelayMs`, so this one happened to be merely wrong, not dangerous.
+ *
+ * `parseOptionalCap` above returns Infinity for blank because "no cap" IS
+ * infinity for that one setting; every other setting here has a real,
+ * specific default instead, so this takes it explicitly rather than reusing
+ * a general-purpose fallback of Infinity that would be wrong everywhere else.
+ */
+export function parseOptionalNumber(raw: string | undefined, fallback: number): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return fallback;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function parseTimeOfDay(raw: string | undefined, label: string): string | null {
   if (!raw?.trim()) return null;
   if (!/^\d{2}:\d{2}$/.test(raw.trim())) {
@@ -191,26 +220,34 @@ export function loadWaveEngineConfig(env: NodeJS.ProcessEnv = process.env): Wave
     forcedTriggerTime: parseTimeOfDay(env.WAVE_ENGINE_FORCED_TRIGGER, 'FORCED_TRIGGER') ?? '15:45',
     preShiftRoundTime: parseTimeOfDay(env.WAVE_ENGINE_PRE_SHIFT_TIME, 'PRE_SHIFT_TIME'),
     livePriorities: parseLivePriorities(env.WAVE_ENGINE_LIVE_PRIORITIES),
-    urgentLoopMinutes: Number(env.WAVE_ENGINE_URGENT_LOOP_MINUTES ?? 3),
-    mainLoopMinutes: Number(env.WAVE_ENGINE_MAIN_LOOP_MINUTES ?? 12),
-    jitterSeconds: Number(env.WAVE_ENGINE_JITTER_SECONDS ?? 25),
+    urgentLoopMinutes: parseOptionalNumber(env.WAVE_ENGINE_URGENT_LOOP_MINUTES, 3),
+    mainLoopMinutes: parseOptionalNumber(env.WAVE_ENGINE_MAIN_LOOP_MINUTES, 12),
+    jitterSeconds: parseOptionalNumber(env.WAVE_ENGINE_JITTER_SECONDS, 25),
     // Same default and env var the rest of the repo already uses for "the real
     // warehouse" (move-export-service.ts, import-moves.ts), so this feature
-    // can't drift to a different idea of which warehouse is real.
-    pickingWarehouse: env.WAVE_ENGINE_PICKING_WAREHOUSE ?? env.INVENTORY_WAREHOUSE_NAME ?? 'STOCK_5',
+    // can't drift to a different idea of which warehouse is real. `|| ` not
+    // `??` deliberately: a blank WAVE_ENGINE_PICKING_WAREHOUSE ("KEY=") is an
+    // empty string, which `??` would accept as a real (wrong, unmatchable)
+    // warehouse name instead of falling through to the next source.
+    pickingWarehouse: env.WAVE_ENGINE_PICKING_WAREHOUSE || env.INVENTORY_WAREHOUSE_NAME || 'STOCK_5',
     // Name kept identical to decoy-reconciliation-service.ts's DECOY_WAREHOUSE.
-    decoyWarehouse: env.WAVE_ENGINE_DECOY_WAREHOUSE ?? 'STOCK_ซิงก์ขายออนไลน์',
+    decoyWarehouse: env.WAVE_ENGINE_DECOY_WAREHOUSE || 'STOCK_ซิงก์ขายออนไลน์',
     // The store order-demand-service already treats as a special case for the
     // same underlying reason (its orders are reservations priced at THB 0, not
     // real shipments).
-    reservedStore: env.WAVE_ENGINE_RESERVED_STORE ?? 'LockStock',
-    allowedPlatforms: (env.WAVE_ENGINE_ALLOWED_PLATFORMS ?? 'Shopee,Lazada,TikTok')
+    reservedStore: env.WAVE_ENGINE_RESERVED_STORE || 'LockStock',
+    // A blank WAVE_ENGINE_ALLOWED_PLATFORMS ("KEY=") used to survive `??` (an
+    // empty string, not undefined) and split into `['']`, which the trim+
+    // filter below reduced to an EMPTY array — every platform would then read
+    // as "blocked", silently refusing to touch a single order. `|| ` falls
+    // through to the real default instead.
+    allowedPlatforms: (env.WAVE_ENGINE_ALLOWED_PLATFORMS || 'Shopee,Lazada,TikTok')
       .split(',')
       .map((name) => name.trim())
       .filter((name) => name !== ''),
-    minParcelsSingleType: Number(env.WAVE_ENGINE_MIN_PARCELS_SINGLE ?? 50),
-    minParcelsMultiType: Number(env.WAVE_ENGINE_MIN_PARCELS_MULTI ?? 20),
-    waveIntervalMinutes: Number(env.WAVE_ENGINE_WAVE_INTERVAL_MINUTES ?? 30),
-    expiryUrgentMinutes: Number(env.WAVE_ENGINE_EXPIRY_URGENT_MINUTES ?? 120),
+    minParcelsSingleType: parseOptionalNumber(env.WAVE_ENGINE_MIN_PARCELS_SINGLE, 50),
+    minParcelsMultiType: parseOptionalNumber(env.WAVE_ENGINE_MIN_PARCELS_MULTI, 20),
+    waveIntervalMinutes: parseOptionalNumber(env.WAVE_ENGINE_WAVE_INTERVAL_MINUTES, 30),
+    expiryUrgentMinutes: parseOptionalNumber(env.WAVE_ENGINE_EXPIRY_URGENT_MINUTES, 120),
   };
 }

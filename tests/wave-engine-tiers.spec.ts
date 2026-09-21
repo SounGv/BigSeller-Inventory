@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { loadWaveEngineConfig, parseOptionalCap, type WaveEngineConfig } from '../src/wave-engine/config.js';
+import { loadWaveEngineConfig, parseOptionalCap, parseOptionalNumber, type WaveEngineConfig } from '../src/wave-engine/config.js';
 import {
   bangkokDateKey,
   bangkokHhMm,
@@ -837,5 +837,64 @@ test.describe('parseOptionalCap — WAVE_ENGINE_MAX_LIVE_CONFIRMS', () => {
   test('an unparseable value falls back to no cap rather than crashing the run', () => {
     expect(parseOptionalCap('not-a-number')).toBe(Number.POSITIVE_INFINITY);
     expect(parseOptionalCap('-5')).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+test.describe('parseOptionalNumber — every other WAVE_ENGINE_* numeric setting', () => {
+  test('blank falls back to the given default, not 0', () => {
+    // The same bug as MAX_LIVE_CONFIRMS, found 2026-09-21 to be present in
+    // every other numeric setting too: Number(x ?? default) never applies
+    // `default` for .env's blank form ("KEY=", an empty string), and
+    // Number('') is 0. minParcelsSingleType/minParcelsMultiType hitting 0
+    // this way would let a single-parcel row "reach" the wave threshold —
+    // directly against "จำนวนน้อยอย่าสร้างนะ".
+    expect(parseOptionalNumber('', 50)).toBe(50);
+    expect(parseOptionalNumber(undefined, 20)).toBe(20);
+    expect(parseOptionalNumber('   ', 30)).toBe(30);
+  });
+
+  test('a real value, including a deliberate 0, is respected', () => {
+    expect(parseOptionalNumber('7', 50)).toBe(7);
+    expect(parseOptionalNumber('0', 50)).toBe(0);
+  });
+
+  test('an unparseable value falls back to the default rather than becoming NaN', () => {
+    expect(parseOptionalNumber('not-a-number', 12)).toBe(12);
+  });
+});
+
+test.describe('config numeric fields all resolve their real default when blank (2026-09-21)', () => {
+  test('every WAVE_ENGINE_* numeric setting survives being left blank', () => {
+    const blank = config({
+      WAVE_ENGINE_URGENT_LOOP_MINUTES: '',
+      WAVE_ENGINE_MAIN_LOOP_MINUTES: '',
+      WAVE_ENGINE_JITTER_SECONDS: '',
+      WAVE_ENGINE_MIN_PARCELS_SINGLE: '',
+      WAVE_ENGINE_MIN_PARCELS_MULTI: '',
+      WAVE_ENGINE_WAVE_INTERVAL_MINUTES: '',
+      WAVE_ENGINE_EXPIRY_URGENT_MINUTES: '',
+    });
+    expect(blank.urgentLoopMinutes).toBe(3);
+    expect(blank.mainLoopMinutes).toBe(12);
+    expect(blank.jitterSeconds).toBe(25);
+    expect(blank.minParcelsSingleType).toBe(50);
+    expect(blank.minParcelsMultiType).toBe(20);
+    expect(blank.waveIntervalMinutes).toBe(30);
+    expect(blank.expiryUrgentMinutes).toBe(120);
+  });
+
+  test('a blank WAVE_ENGINE_ALLOWED_PLATFORMS falls back to the real default, not an empty (block-everything) list', () => {
+    expect(config({ WAVE_ENGINE_ALLOWED_PLATFORMS: '' }).allowedPlatforms).toEqual(['Shopee', 'Lazada', 'TikTok']);
+  });
+
+  test('a blank WAVE_ENGINE_PICKING_WAREHOUSE / RESERVED_STORE / DECOY_WAREHOUSE falls back correctly', () => {
+    const blank = config({
+      WAVE_ENGINE_PICKING_WAREHOUSE: '',
+      WAVE_ENGINE_RESERVED_STORE: '',
+      WAVE_ENGINE_DECOY_WAREHOUSE: '',
+    });
+    expect(blank.pickingWarehouse).toBe('STOCK_5');
+    expect(blank.reservedStore).toBe('LockStock');
+    expect(blank.decoyWarehouse).toBe('STOCK_ซิงก์ขายออนไลน์');
   });
 });
