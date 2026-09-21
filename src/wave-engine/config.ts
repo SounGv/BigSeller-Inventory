@@ -103,6 +103,26 @@ function parseWindows(raw: string | undefined, label: string): TimeWindow[] {
   return windows;
 }
 
+/**
+ * An optional positive cap read directly from `process.env` at the point of
+ * use (WAVE_ENGINE_MAX_LIVE_CONFIRMS is not part of the structured config
+ * above — it is meant to be flipped per-run, not left set). Blank means "no
+ * cap" by design ("Blank = no cap" in .env.example) — but `Number(x ?? Y)`
+ * only substitutes `Y` for `null`/`undefined`, and `.env`'s usual blank form
+ * (`KEY=`) hands Node the EMPTY STRING, not undefined. `Number('')` is `0` in
+ * JavaScript, not `NaN` — so a blank line silently became a cap of ZERO,
+ * confirming nothing forever while looking identical to "uncapped" in the
+ * file. Confirmed live 2026-09-21: a run logged "confirming the 0 most
+ * urgent of 50 live-eligible order(s)" with the line left blank exactly as
+ * documented.
+ */
+export function parseOptionalCap(raw: string | undefined): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return Number.POSITIVE_INFINITY;
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= 0 ? value : Number.POSITIVE_INFINITY;
+}
+
 function parseTimeOfDay(raw: string | undefined, label: string): string | null {
   if (!raw?.trim()) return null;
   if (!/^\d{2}:\d{2}$/.test(raw.trim())) {

@@ -4,7 +4,7 @@ import { readFilterPills } from '../bigseller/new-orders-dom.js';
 import { assertScanIsComplete, BigSellerOrderPriorityPage, type ScannedOrderRow } from '../bigseller/order-priority-page.js';
 import { logger } from '../utils/logger.js';
 import { parseThaiDateTime } from '../utils/thai-date.js';
-import { SELLER_DELIVERY_CHANNEL, type WaveEngineConfig } from './config.js';
+import { parseOptionalCap, SELLER_DELIVERY_CHANNEL, type WaveEngineConfig } from './config.js';
 import { DecisionLog, type LoopName } from './decision-log.js';
 import { minParcelsForWaveType, readWaveState, recordWaveCreated, shouldWaveNow } from './wave-state.js';
 import {
@@ -522,8 +522,9 @@ async function executeTier1(
   // A trial run confirms a couple of orders, not the whole queue. The first
   // live outing of any click that writes to BigSeller should be small enough
   // that a person can eyeball the result before it happens 14 more times.
-  // Unlimited unless set.
-  const maxConfirms = Number(process.env.WAVE_ENGINE_MAX_LIVE_CONFIRMS ?? Number.POSITIVE_INFINITY);
+  // Unlimited unless set — parseOptionalCap, not a bare Number(x ?? Infinity):
+  // that treated .env's blank form (KEY=, an empty string) as a cap of ZERO.
+  const maxConfirms = parseOptionalCap(process.env.WAVE_ENGINE_MAX_LIVE_CONFIRMS);
   const queue = sortByPriority(tier1Ready);
   if (queue.length > maxConfirms) {
     await logger.warn(

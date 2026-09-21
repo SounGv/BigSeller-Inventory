@@ -6,7 +6,7 @@ import { NEW_ORDERS_URL, readFilterPills } from '../src/bigseller/new-orders-dom
 import { BigSellerOrderPriorityPage } from '../src/bigseller/order-priority-page.js';
 import { launchBigSellerBrowser } from '../src/utils/browser-runner.js';
 import { logger } from '../src/utils/logger.js';
-import { loadWaveEngineConfig, SELLER_DELIVERY_CHANNEL } from '../src/wave-engine/config.js';
+import { loadWaveEngineConfig, parseOptionalCap, SELLER_DELIVERY_CHANNEL } from '../src/wave-engine/config.js';
 import { PLATFORM_CUTOFF } from '../src/wave-engine/channel-policy.js';
 import { DecisionLog } from '../src/wave-engine/decision-log.js';
 import { startScheduler } from '../src/wave-engine/scheduler.js';
@@ -301,7 +301,11 @@ async function runBulkRound(page: Page, config: ReturnType<typeof loadWaveEngine
       expectedCourier: pill.label,
       allowedPlatforms: config.allowedPlatforms,
       reservedStore: config.reservedStore,
-      maxOrders: Number(process.env.WAVE_ENGINE_MAX_LIVE_CONFIRMS ?? count),
+      // parseOptionalCap, not Number(x ?? count) — the old form had the same
+      // "blank .env line is an empty string, not undefined" bug as the daemon
+      // path: Number('') is 0 in JavaScript, so a blank cap silently refused
+      // every bulk confirm here too (before.waiting > 0 is always true).
+      maxOrders: parseOptionalCap(process.env.WAVE_ENGINE_MAX_LIVE_CONFIRMS),
     });
     note(`           ยืนยัน ${result.confirmed} ใบ — ${result.note}`);
 

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { loadWaveEngineConfig, type WaveEngineConfig } from '../src/wave-engine/config.js';
+import { loadWaveEngineConfig, parseOptionalCap, type WaveEngineConfig } from '../src/wave-engine/config.js';
 import {
   bangkokDateKey,
   bangkokHhMm,
@@ -814,5 +814,28 @@ test.describe('pre-shift round — a real cycle fired before the afternoon shift
 
   test('an unparseable time is dropped rather than silently misfiring all day', () => {
     expect(config({ WAVE_ENGINE_PRE_SHIFT_TIME: 'not-a-time' }).preShiftRoundTime).toBeNull();
+  });
+});
+
+test.describe('parseOptionalCap — WAVE_ENGINE_MAX_LIVE_CONFIRMS', () => {
+  test('blank means no cap, not zero', () => {
+    // Confirmed live 2026-09-21: a bare `Number(x ?? Infinity)` treats .env's
+    // blank form ("KEY=", an empty string) as 0, not undefined — Number('')
+    // is 0 in JavaScript. That silently capped every live cycle at zero
+    // confirms while looking identical to "uncapped" in the file.
+    expect(parseOptionalCap('')).toBe(Number.POSITIVE_INFINITY);
+    expect(parseOptionalCap(undefined)).toBe(Number.POSITIVE_INFINITY);
+    expect(parseOptionalCap('   ')).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  test('a real number is respected, including a deliberate 0', () => {
+    expect(parseOptionalCap('5')).toBe(5);
+    expect(parseOptionalCap('1')).toBe(1);
+    expect(parseOptionalCap('0')).toBe(0);
+  });
+
+  test('an unparseable value falls back to no cap rather than crashing the run', () => {
+    expect(parseOptionalCap('not-a-number')).toBe(Number.POSITIVE_INFINITY);
+    expect(parseOptionalCap('-5')).toBe(Number.POSITIVE_INFINITY);
   });
 });
