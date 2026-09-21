@@ -100,14 +100,22 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (bulk) {
-      await runBulkRound(page, config);
-      return;
-    }
-
-    if (bulkLoop) {
-      await runBulkLoop(page, config);
-      return;
+    // DISABLED 2026-09-21 — see bulkConfirmFiltered's own doc comment in
+    // order-priority-page.ts. Its safety guards read filter pill counts that
+    // never narrow to the courier being confirmed, so every real attempt
+    // refused every real courier, both on 2026-09-15 and again on
+    // 2026-09-21. Failing at the dispatch point rather than letting
+    // runBulkRound/runBulkLoop start: --bulk-loop's own retry loop would
+    // otherwise just hit this same permanent error every few minutes
+    // forever, and --bulk's "which courier is at target" table duplicates
+    // what --board already shows correctly today.
+    if (bulk || bulkLoop) {
+      throw new Error(
+        `--${bulk ? 'bulk' : 'bulk-loop'} is disabled: it can never confirm anything (see bulkConfirmFiltered's ` +
+          'doc comment in src/bigseller/order-priority-page.ts for the full investigation). Use --board for the ' +
+          'same "which courier is at target" view, and the daemon (npm run wave-engine, or --once/--fast) to ' +
+          'actually confirm and wave — its per-row exclusion check works.',
+      );
     }
 
     if (expiring) {

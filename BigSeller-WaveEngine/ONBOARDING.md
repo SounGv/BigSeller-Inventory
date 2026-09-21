@@ -50,33 +50,37 @@ Never commit `.env`, `secrets/`, or `playwright/.auth/`. They are gitignored; ke
 | `npm run wave-engine -- --dump` | Raw order rows next to what the parser made of them | No |
 | `npm run wave-engine -- --zones` | Which FLOOR each channel's orders pick from, and which orders span both | No — ~4 min |
 | `npm run wave-engine -- --expiring` | Every order still open, soonest-to-expire first, split into "inside the urgent window" vs the rest | No — ~2-4 min |
-| `npm run wave-engine -- --bulk` | One courier at a time: filter to it, check the target is met, press BigSeller's own ยืนยัน button, then wave it | Only if live priorities are set |
-| `npm run wave-engine -- --bulk-loop` | Repeats `--bulk` on a timer (~4 min default) instead of running as a daemon | Only if live priorities are set |
 | `npm run wave-engine -- --once` | One full cycle: scan, decide, log | Only if live priorities are set |
 | `npm run wave-engine -- --fast` | Same, but acts on the single highest-priority carrier — ~20s instead of ~2 min | Only if live priorities are set |
 | `npm run wave-engine` | Daemon: urgent loop every ~3 min, main loop every ~12 min, plus the pre-shift trigger below if set | Only if live priorities are set |
 
 Start with `--board`. It answers "what do I confirm first" without reading a single row,
-because BigSeller already counts the queue for you.
+because BigSeller already counts the queue for you. **This is the only live-confirming path —
+use it.**
 
 ---
 
-**Filter to what's needed, don't scan everything — remember this before adding a new mode.**
-Instructed 2026-09-15, pointing straight at the numbers on the order page's own filter row:
-"ให้กรองที่วงให้ ไม่ต้องเสียเวลาสแกนทั้งหมด แค่ดูคอลัมน์ที่วงให้" (filter to what's circled —
-don't waste time scanning everything, just read the columns that were circled). The circled
-columns were: the แพลตฟอร์ม / โลจิสติกส์ / คลังสินค้า filter row **badges**, the ยืนยัน button, the
-รอยืนยัน / กำลังยืนยัน / ยืนยันล้มเหลว / ของขาด counters beside it, and the เวลาหมดอายุ sort.
+**`--bulk` and `--bulk-loop` are DISABLED (2026-09-21) — do not try to re-enable them without
+reading this first.** They were built 2026-09-15 on a real, good instinct — "ให้กรองที่วงให้
+ไม่ต้องเสียเวลาสแกนทั้งหมด แค่ดูคอลัมน์ที่วงให้" (filter to what's circled, don't waste time
+scanning everything, just read the columns that were circled: the แพลตฟอร์ม / ร้านค้า filter
+badges, the ยืนยัน button, its รอยืนยัน counters) — click BigSeller's own bulk ยืนยัน button once
+per courier instead of confirming row by row, so the reservation/blocked-platform check would
+only ever need a **count**, not a full scan.
 
-This is why `--bulk` and `--bulk-loop` are fast (~10-20s a round) while the plain daemon
-(`npm run wave-engine`, no flag) is not: the daemon confirms one ROW at a time, so it has to
-know each individual order's id — which means enumerating every LockStock and blocked-platform
-order by name, a real scan. `--bulk` instead clicks BigSeller's own ยืนยัน button once per
-courier, so it only ever needs a **count** to know a reservation or blocked platform sits inside
-the current filter — the same badges a person glances at before clicking. **Prefer `--bulk` /
-`--bulk-loop` over the plain daemon whenever the choice is open** — reach for a full scan
-(`--once`, `--fast`, the daemon) only when something genuinely needs a specific order's own id,
-not merely "is this filter clear to click."
+It doesn't work. The ร้านค้า and แพลตฟอร์ม pills it depends on are **global** — proven live that
+neither narrows under the โลจิสติกส์ filter this button needs ("Shopee-TH-SPX Express" holding 3
+orders still showed LockStock's WHOLE-QUEUE count of 60). That count is essentially always > 0, so
+the safety guard refused literally every real courier, every time, on both 2026-09-15 and
+2026-09-21, without a single genuine confirm. A same-day attempt at a "cheap" fix — check the
+reserved store under each ALLOWED PLATFORM instead, since that filter does narrow correctly —
+measured **slower** than the daemon's full scan it was meant to replace (65.6s vs 58.6s): the real
+cost is BigSeller's own page-settle wait per filter click, not rows read, and the fix needed more
+clicks than the scan it was avoiding. **The daemon's per-row scan is the fastest safe way found so
+far — it is not a compromise, it is the answer.** `bulkConfirmFiltered` (order-priority-page.ts)
+now throws immediately with this same explanation; `--bulk`/`--bulk-loop` refuse at the dispatch
+point in scripts/wave-engine.ts. `--board` already shows "which courier is at target" without any
+of this.
 
 ---
 
@@ -146,6 +150,17 @@ on hundreds of ready-to-wave orders all day doing nothing. Now: batch until 20, 
 if the batch still hasn't filled by the truck time, send whatever is left anyway rather than miss
 that day's pickup.
 
+**Bug fixed 2026-09-21 — a blank `WAVE_ENGINE_MAX_LIVE_CONFIRMS` silently capped every live cycle
+at ZERO, even after the fix above.** `.env`'s documented "blank = no cap" relied on `Number(x ??
+Infinity)`, but a blank line (`KEY=`) is the empty string, not `undefined` — `??` never applied,
+and `Number('')` is `0` in JavaScript, not `NaN`. Every cycle correctly found eligible orders and
+then confirmed exactly none of them, logging "confirming the 0 most urgent of N" — easy to miss
+unless you read that exact number. This is very likely a real contributor to every earlier "why
+did nothing confirm" session, independent of the timing bug above. Fixed with a proper
+`parseOptionalNumber`/`parseOptionalCap` (config.ts) that treats blank/whitespace as genuinely
+unset — audited and fixed the same shape in every other `WAVE_ENGINE_*` numeric and string
+setting while at it, none of which were live-triggered yet but all shared the identical flaw.
+
 **Wave sizing.** One wave is one picking trip to one floor, so a wave is only created once
 it is worth the trip: **50 parcels for single-SKU rows, 20 for multi-SKU rows**. Short loads
 collect for 30 minutes and then go as one batch. A carrier that never reaches the threshold
@@ -186,7 +201,7 @@ a picker walking between floors. They are logged for a human every time.
   batching window measures from.
 
 ```bash
-npm run test:unit     # 177 unit tests, no browser needed
+npm run test:unit     # 195 unit tests, no browser needed
 npx tsc --noEmit
 ```
 

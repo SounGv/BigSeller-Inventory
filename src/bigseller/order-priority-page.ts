@@ -542,17 +542,33 @@ export class BigSellerOrderPriorityPage {
   }
 
   /**
-   * Confirms every order under the CURRENT filter in one click, the way staff
-   * do it (instructed 2026-09-12: filter platform, filter logistics, check the
-   * count, press ยืนยัน).
+   * DISABLED 2026-09-21 — see the throw at the top. Confirms every order
+   * under the CURRENT filter in one click, the way staff do it (instructed
+   * 2026-09-12: filter platform, filter logistics, check the count, press
+   * ยืนยัน). Row-by-row confirming was both slower than a person and less
+   * reliable — two live attempts on 2026-09-12 clicked a row's own confirm
+   * control and neither landed — so this looked like the right replacement.
    *
-   * Row-by-row confirming was both slower than a person and less reliable —
-   * two live attempts on 2026-09-12 clicked a row's own confirm control and
-   * neither landed. This button is the one the warehouse actually uses.
-   *
-   * It is also the most dangerous control on the page: it acts on everything
-   * the filter is showing, so the guards below are the whole safety story.
-   * Nothing is clicked unless every one of them passes.
+   * It cannot be made safe without giving up the one thing that made it worth
+   * building. Its "reservation/blocked-platform in scope" guards (3 and 4
+   * below) read the ร้านค้า / แพลตฟอร์ม filter's own PILL COUNTS, which are
+   * GLOBAL — proven live 2026-09-15 that neither one narrows under the
+   * โลจิสติกส์ filter this method depends on (LockStock's pill read 60 under
+   * a courier holding 3 orders). That means guard 3 and 4 read the WHOLE
+   * QUEUE's reservation/blocked-platform count on every call, which is
+   * essentially always > 0 — so they refused literally every real courier,
+   * every time, all day on 2026-09-15 and 2026-09-21, without a single
+   * genuine hit. A same-day attempt at a "cheap" fix (check the pill under
+   * each allowed platform instead, since that filter DOES narrow it
+   * correctly) measured SLOWER than the daemon's full scan it was meant to
+   * replace (65.6s vs 58.6s) — the real cost is BigSeller's page-settle wait
+   * per filter click, not rows read, and the fix needed more clicks than the
+   * scan it was avoding. There is no cheap way to know which orders are
+   * inside a filtered VIEW without either scanning it (the daemon's `--once`/
+   * `--fast`/plain path, already fixed and working) or asking a badge that
+   * turns out not to be scoped to that view. Kept as dead code with this
+   * explanation rather than deleted, in case a future BigSeller UI change
+   * makes one of these pills genuinely scope-aware and this becomes viable.
    */
   async bulkConfirmFiltered(params: {
     expectedCourier: string;
@@ -560,106 +576,14 @@ export class BigSellerOrderPriorityPage {
     reservedStore: string;
     maxOrders: number;
   }): Promise<{ confirmed: number; before: number; after: number; note: string }> {
-    const { expectedCourier, allowedPlatforms, reservedStore, maxOrders } = params;
-
-    // Guard 1 — the logistics filter must be narrowed to the ONE courier this
-    // call was told about. A bulk confirm under ทั้งหมด would confirm the whole
-    // queue.
-    const logistics = (await readFilterPills(this.page, 'โลจิสติกส์')).find((pill) => pill.active);
-    if (!logistics || logistics.label !== expectedCourier) {
-      throw new Error(
-        `Refusing to bulk confirm: the โลจิสติกส์ filter reads "${logistics?.label ?? '(nothing active)'}" but this call is for "${expectedCourier}".`,
-      );
-    }
-
-    // Guard 2 — reservations live under Seller Delivery, and a bulk confirm
-    // cannot pick rows out of a set. The only safe answer is never to run one
-    // on that courier.
-    if (logistics.label.includes(SELLER_DELIVERY_CHANNEL)) {
-      throw new Error(
-        `Refusing to bulk confirm "${logistics.label}": ${reservedStore} reservations live under this courier and a bulk confirm cannot leave them out.`,
-      );
-    }
-
-    // Guard 3 — and prove it, rather than trusting the courier name. If any
-    // reserved order is visible under this filter, stop.
-    const reservedHere = (await readFilterPills(this.page, 'ร้านค้า')).find((pill) => pill.label === reservedStore);
-    if ((reservedHere?.count ?? 0) > 0) {
-      throw new Error(
-        `Refusing to bulk confirm: ${reservedHere?.count} ${reservedStore} order(s) are inside the current filter and would be confirmed with everything else.`,
-      );
-    }
-
-    // Guard 4 — every platform showing anything must be one this engine may act
-    // on.
-    const platformsPresent = (await readFilterPills(this.page, 'แพลตฟอร์ม')).filter(
-      (pill) => pill.label !== 'ทั้งหมด' && (pill.count ?? 0) > 0,
+    void params;
+    throw new Error(
+      'bulkConfirmFiltered is disabled: its reservation/platform guards read filter pill counts that do not narrow ' +
+        'under the โลจิสติกส์ filter this method needs, so they refused every real courier on 2026-09-15 and ' +
+        '2026-09-21 without ever confirming anything. Use the daemon (npm run wave-engine, or --once/--fast) instead ' +
+        "— its per-row confirm has a working, tested exclusion check. See this method's own doc comment (and git " +
+        'history for the deleted implementation) before attempting to re-enable it.',
     );
-    const blocked = platformsPresent.filter(
-      (pill) => !allowedPlatforms.some((allowed) => pill.label.toLowerCase().includes(allowed.toLowerCase())),
-    );
-    if (blocked.length > 0) {
-      throw new Error(
-        `Refusing to bulk confirm: ${blocked.map((pill) => `${pill.label} (${pill.count})`).join(', ')} ` +
-          `${blocked.length === 1 ? 'is' : 'are'} outside ${allowedPlatforms.join('/')} and would be confirmed too.`,
-      );
-    }
-
-    const before = await this.readConfirmCounters();
-    if (before.waiting <= 0) {
-      return { confirmed: 0, before: before.waiting, after: before.waiting, note: 'nothing waiting to confirm under this filter' };
-    }
-
-    // Guard 5 — a set larger than the caller expected means the filter is not
-    // what it thought. Better to stop than to confirm hundreds by surprise.
-    if (before.waiting > maxOrders) {
-      throw new Error(
-        `Refusing to bulk confirm ${before.waiting} order(s) for "${expectedCourier}" — more than the ${maxOrders} this run allows.`,
-      );
-    }
-
-    await logger.warn(
-      `wave-engine: BULK CONFIRM "${expectedCourier}" — ${before.waiting} order(s) waiting, ` +
-        `failed=${before.failed} shortStock=${before.shortStock}. Clicking ยืนยัน now.`,
-    );
-
-    await dismissOrderPageOverlays(this.page);
-    const button = this.page.locator('button.ant-btn-primary:visible').filter({ hasText: /^ยืนยัน$/ }).first();
-    if ((await button.count()) === 0) throw new Error('Bulk ยืนยัน button not found on the page');
-    await humanDelay(600, 1600);
-    await clickThroughGuide(this.page, button, { timeout: 8000 });
-    const modalNote = await this.acknowledgeConfirmModalIfPresent();
-
-    // BigSeller processes a bulk confirm in the background — กำลังยืนยัน rises
-    // and รอยืนยัน falls over several seconds — so the result is read from the
-    // counters settling, not from the click returning.
-    const deadline = Date.now() + BULK_CONFIRM_TIMEOUT_MS;
-    let last = before;
-    while (Date.now() < deadline) {
-      await this.page.waitForTimeout(2000);
-      const now = await this.readConfirmCounters();
-      if (now.inProgress === 0 && now.waiting < before.waiting) {
-        return {
-          confirmed: before.waiting - now.waiting,
-          before: before.waiting,
-          after: now.waiting,
-          note:
-            `รอยืนยัน ${before.waiting} → ${now.waiting}` +
-            (now.failed > before.failed ? `, ยืนยันล้มเหลว +${now.failed - before.failed}` : '') +
-            (now.shortStock > before.shortStock ? `, ของขาด +${now.shortStock - before.shortStock}` : '') +
-            modalNote,
-        };
-      }
-      last = now;
-    }
-    return {
-      confirmed: 0,
-      before: before.waiting,
-      after: last.waiting,
-      note:
-        `clicked ยืนยัน but after ${BULK_CONFIRM_TIMEOUT_MS / 1000}s รอยืนยัน is still ${last.waiting} ` +
-        `(กำลังยืนยัน ${last.inProgress})${modalNote} — needs manual verification`,
-    };
   }
 
   async confirmOrder(orderId: string): Promise<ConfirmResult> {
