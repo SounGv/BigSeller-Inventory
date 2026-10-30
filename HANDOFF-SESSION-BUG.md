@@ -159,6 +159,65 @@ npm run sync:inventory     # reproduces the bug — watch the headed browser win
 `logs/scheduled-sync.log` also has historical output if you want more failure
 samples without waiting for the retry loop.
 
+## Update (2026-10-12): single-active-session theory CONFIRMED (partially)
+
+Item 8 above ("Consider whether this is a single-active-session policy") was
+re-tested and got a positive signal this time: the user confirmed they had
+BigSeller open in a separate, everyday browser/tab WHILE the automated
+Playwright session was also logged in. Symptom observed: the automated
+session (freshly logged in via `npm run login:bigseller`, confirmed saved)
+got kicked within under a minute — much faster than the ~20–90 minute pattern
+seen on other days. Closing the other BigSeller session before re-running
+`npm run login:bigseller` is the current recommended workaround.
+
+Not yet confirmed: whether it's genuinely a hard single-session policy (any
+new login anywhere kills the other), or something narrower (e.g. only
+triggered by an *action* in the other tab, not just having it open). Someone
+re-investigating this should test logging in automated-only (everyday
+BigSeller fully logged out everywhere else) and see if the long-idle (~20–90
+min) pattern still happens on its own — that would tell us whether this is
+the ONLY cause or just makes an existing shorter-timeout bug worse.
+
+## Update (2026-10-30): ported the sibling project's confirmed fix + added missing evidence capture
+
+Two changes, both safe (no BigSeller/Sheets writes, no credential handling):
+
+1. **`npm run keep-alive` (`scripts/session-keeper.ts`), ported from the sibling
+   `BigSeller-Inventory` project**, where this exact approach was confirmed live
+   (2026-08-29) to survive 64+ minutes with zero expiries. The lead: every script
+   here launches a brand-new Chromium process from the same static
+   `playwright/.auth/bigseller.json` snapshot and never writes back to it — so if
+   BigSeller rotates `JSESSIONID` during normal use (it does, on most
+   authenticated responses), that rotation is only ever visible to whichever
+   short-lived browser happened to be open, then thrown away when it exits. The
+   next script then replays a stale cookie. `session-keeper.ts` keeps ONE
+   headless context open, pings every `SESSION_KEEPER_INTERVAL_MINUTES` (default
+   8), and re-saves `storageState` after every ping, so every other script
+   (they all re-read the file fresh) sees the latest cookie. **Not yet confirmed
+   in THIS project** — needs an actual run alongside real work to see if it
+   holds here too. Run it continuously during any extended BigSeller session.
+
+2. **`ensureSessionValid` (`src/bigseller/auth.ts`) now logs the evidence this
+   doc has been asking for since 2026-08-24** — it never existed anywhere,
+   because a failed check throws `SessionExpiredError`, which
+   `withBigSellerPage` never retries (by design), and Playwright tracing only
+   starts on retry. So literally none of the "Session check failed" log lines
+   seen across Oct 6 – Oct 28 had a trace or network log behind them. Fixed: on
+   every failed check, it now logs (a) whether `JSESSIONID` itself rotated
+   during the check (server-side invalidation) or stayed identical (client-side
+   race/false negative), and (b) the status + URL of every `bigseller.*`
+   response observed during the check window. **Next time this reproduces, read
+   the log line itself** — no need to dig through a trace zip.
+
+Also noticed: `logs/2026-10-21.log` shows someone manually re-running
+`npm run validate` roughly every 30–50s for ~45 minutes (lines 27-45) —
+consistent with trying to catch the failure moment by hand per this doc's own
+"How to investigate next" section — and it still failed once (11:30:42) despite
+being checked ~75s earlier. That run predates both fixes above, so it has
+neither storageState propagation nor the new diagnostic log; it's not new
+evidence, just confirms the problem is real and intermittent on a ~tens-of-
+minutes timescale, not a fixed interval.
+
 ## Non-negotiable constraint
 
 Per this project's explicit design (see `README.md` and `.env.example`

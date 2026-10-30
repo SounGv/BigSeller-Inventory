@@ -8,8 +8,12 @@
     "login:bigseller": "tsx scripts/login-bigseller.ts",
     "sync:inventory": "tsx scripts/sync-inventory.ts",
     "sync:sales": "tsx scripts/sync-sales.ts",
+    "sync:returns": "tsx scripts/sync-returns.ts",
+    "sync:cancelled-orders": "tsx scripts/sync-cancelled-orders.ts",
+    "sync:cancelled-orders-from-file": "tsx scripts/sync-cancelled-orders-from-file.ts",
     "sync:all": "tsx scripts/sync-all.ts",
     "validate": "tsx scripts/validate.ts",
+    "keep-alive": "tsx scripts/session-keeper.ts",
     "sync:bigseller": "tsx scripts/sync-bigseller.ts",
     "validate:sync": "tsx scripts/validate-sync.ts",
     "plan:moves": "tsx scripts/plan-moves.ts",
@@ -25,7 +29,7 @@
     "import:carton-qty": "tsx scripts/import-carton-qty.ts",
     "bot:line": "tsx scripts/line-command-bot.ts",
     "test": "playwright test",
-    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts"
+    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts tests/return-rules.spec.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

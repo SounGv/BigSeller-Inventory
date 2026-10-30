@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import type { BrowserContext, Page } from '@playwright/test';
+import type { BrowserContext, Page, Response } from '@playwright/test';
 import { logger } from '../utils/logger.js';
 
 export class SessionExpiredError extends Error {
@@ -140,11 +140,47 @@ export async function isSessionValid(page: Page, url: string): Promise<boolean> 
   return checkIsLoggedIn(page);
 }
 
+/**
+ * On top of the valid/invalid verdict, captures the exact evidence
+ * HANDOFF-SESSION-BUG.md calls "the single most useful piece of missing
+ * information right now" — because that evidence has never actually been
+ * captured: a failed check throws `SessionExpiredError`, which
+ * `withBigSellerPage` never retries, so Playwright tracing (which only starts
+ * on retry) never ran for a single one of these failures. This logs it
+ * directly instead, every time, so the next real occurrence is finally
+ * diagnosable: which bigseller.* response (if any) came back non-2xx right
+ * before the fail, and whether JSESSIONID itself rotated (server-side
+ * invalidation) or stayed the same (client/race condition) during the check.
+ */
 export async function ensureSessionValid(page: Page, url: string): Promise<void> {
   assertStorageStateExists();
-  const valid = await isSessionValid(page, url);
+
+  const cookiesBefore = await page.context().cookies(url);
+  const sessionBefore = cookiesBefore.find((c) => c.name === 'JSESSIONID')?.value;
+
+  const responseLog: string[] = [];
+  const onResponse = (response: Response) => {
+    if (response.url().includes('bigseller.')) {
+      responseLog.push(`${response.status()} ${response.url()}`);
+    }
+  };
+  page.on('response', onResponse);
+
+  let valid: boolean;
+  try {
+    valid = await isSessionValid(page, url);
+  } finally {
+    page.off('response', onResponse);
+  }
+
   if (!valid) {
-    await logger.error(`Session check failed at ${url}`);
+    const cookiesAfter = await page.context().cookies(url);
+    const sessionAfter = cookiesAfter.find((c) => c.name === 'JSESSIONID')?.value;
+    await logger.error(
+      `Session check failed at ${url} — JSESSIONID before="${sessionBefore ?? '(none)'}" ` +
+        `after="${sessionAfter ?? '(none)'}" rotated=${sessionBefore !== sessionAfter}. ` +
+        `Responses during check: ${responseLog.length > 0 ? responseLog.join(' | ') : '(none captured)'}`,
+    );
     throw new SessionExpiredError(url);
   }
   await logger.info(`Session valid at ${url}`);
