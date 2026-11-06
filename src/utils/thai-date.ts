@@ -21,6 +21,24 @@ export function parseThaiDateTime(text: string | null | undefined): Date | null 
   return new Date(Number(year), month, Number(day), Number(hour), Number(minute));
 }
 
+/**
+ * Parses BigSeller's date-only `"DD MMM YYYY"` strings (e.g. `"07 ก.ย. 2026"`,
+ * as in the work-performance export) into a `YYYY-MM-DD` string. Same
+ * Gregorian-year convention as `parseThaiDateTime`. Returns null on anything
+ * that doesn't match or names an impossible day (e.g. 31 ก.พ.).
+ */
+export function parseThaiDateToIso(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const m = text.trim().match(/^(\d{1,2})\s+(\S+)\s+(\d{4})$/);
+  if (!m) return null;
+  const [, day, monthAbbr, year] = m;
+  const month = THAI_MONTHS[monthAbbr];
+  if (month === undefined) return null;
+  const date = new Date(Date.UTC(Number(year), month, Number(day)));
+  if (date.getUTCMonth() !== month || date.getUTCDate() !== Number(day)) return null;
+  return date.toISOString().slice(0, 10);
+}
+
 const THAILAND_UTC_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 /**
