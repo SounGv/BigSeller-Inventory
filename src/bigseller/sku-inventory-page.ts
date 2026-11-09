@@ -175,6 +175,9 @@ export class BigSellerSkuInventoryPage {
       unshelvedWarehouseStock: toNumber(row['สต็อกที่ยังไม่นำเข้าชั้นวางในคลัง']),
       sourceUpdatedAt,
       sourceUrl,
+      inTransitStock: toNumber(row['ระหว่างทาง']),
+      inTransitCost: toNumber(row['ต้นทุนรวมของระหว่างทาง']),
+      costTotal: toNumber(row['ราคาต้นทุนทั้งหมด']),
     }));
 
     if (rows.length === 0) {

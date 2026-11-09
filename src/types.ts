@@ -77,6 +77,12 @@ export interface SkuInventoryRow {
   unshelvedWarehouseStock: number;
   sourceUpdatedAt: string;
   sourceUrl: string;
+  /** "ระหว่างทาง": units on transfers heading INTO this warehouse (not counted in totalWarehouseStock). */
+  inTransitStock?: number;
+  /** "ต้นทุนรวมของระหว่างทาง": BigSeller's own cost of those in-transit units. */
+  inTransitCost?: number;
+  /** "ราคาต้นทุนทั้งหมด": BigSeller's own cost of the on-hand units (the figure on its inventory page header). */
+  costTotal?: number;
 }
 
 /** Dedupe key for SKU-level totals: sku + warehouse */
