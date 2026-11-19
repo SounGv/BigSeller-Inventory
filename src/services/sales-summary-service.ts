@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { BigSellerSalesItemsReportPage, SALES_ITEMS_URL, type ChannelGroup } from '../bigseller/sales-items-report-page.js';
+import { BigSellerSalesItemsReportPage, SALES_ITEMS_URL, type ChannelGroup, type SalesSummaryRow } from '../bigseller/sales-items-report-page.js';
 import { ensureSessionValid } from '../bigseller/auth.js';
 import { SupabaseDbClient } from '../db/supabase-db-client.js';
 import { logger } from '../utils/logger.js';
@@ -14,6 +14,23 @@ function formatLocalDate(d: Date): string {
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+/**
+ * Leaves out today's rows when BigSeller has no figures for today yet.
+ *
+ * BigSeller's stats report does not count the current day: checked 2026-11-18 at 11:00 with the same API call, every figure of
+ * today was 0 for all shops while the day before had 2,522 orders. Writing that 0 would show "no sales" on the dashboard when the
+ * truth is "no data yet". Only the rows of `today` are held back, and only when all of them are zero; an older day with zero
+ * sales stays, because that is a real figure.
+ */
+export function dropTodayWithoutData<T extends Pick<SalesSummaryRow, 'date' | 'salesCount' | 'salesVolumeCount' | 'effectiveSalesAmount' | 'efficientsOrders'>>(
+  rows: T[],
+  today: string,
+): T[] {
+  const todays = rows.filter((r) => r.date === today);
+  const noFigures = todays.length > 0 && todays.every((r) => !r.salesCount && !r.salesVolumeCount && !r.effectiveSalesAmount && !r.efficientsOrders);
+  return noFigures ? rows.filter((r) => r.date !== today) : rows;
 }
 
 /**
@@ -42,25 +59,30 @@ export async function syncSalesSummary(page: Page): Promise<void> {
 
   const reportPage = new BigSellerSalesItemsReportPage(page);
   const today = new Date();
-  const rows: ReturnType<typeof toDbRow>[] = [];
+  const summaries: SalesSummaryRow[] = [];
 
   for (let offset = 0; offset < ROLLING_WINDOW_DAYS; offset++) {
     const date = new Date(today);
     date.setDate(date.getDate() - offset);
     const dateStr = formatLocalDate(date);
-    const isProvisional = offset === 0;
 
     for (const channel of CHANNELS) {
-      const summary = await reportPage.fetchDailySummary(channel, dateStr);
-      rows.push(toDbRow(summary, isProvisional));
+      summaries.push(await reportPage.fetchDailySummary(channel, dateStr));
       await page.waitForTimeout(700); // pace requests — see rate-limit lessons from cancelled-orders-page.ts
     }
   }
 
+  const todayStr = formatLocalDate(today);
+  const usable = dropTodayWithoutData(summaries, todayStr);
+  if (usable.length < summaries.length) {
+    await logger.info(`syncSalesSummary: BigSeller has no figures for ${todayStr} yet — today's ${summaries.length - usable.length} row(s) left out`);
+  }
+  const rows = usable.map((s) => toDbRow(s, s.date === todayStr));
+
   const supabase = SupabaseDbClient.create();
   await supabase.upsertRows(TABLE, rows, ['date', 'channel_group']);
 
-  await logger.info(`syncSalesSummary: upserted ${rows.length} row(s) (${ROLLING_WINDOW_DAYS} days × ${CHANNELS.length} channels), done in ${Date.now() - start}ms`);
+  await logger.info(`syncSalesSummary: upserted ${rows.length} row(s) (up to ${ROLLING_WINDOW_DAYS} days × ${CHANNELS.length} channels), done in ${Date.now() - start}ms`);
 }
 
 function toDbRow(s: Awaited<ReturnType<BigSellerSalesItemsReportPage['fetchDailySummary']>>, isProvisional: boolean) {
