@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { withBigSellerPage } from '../src/utils/browser-runner.js';
 import { SessionExpiredError } from '../src/bigseller/auth.js';
+import { NEW_ORDERS_URL } from '../src/bigseller/new-orders-page.js';
 import { acquireBigSellerSessionLock } from '../src/utils/bigseller-session-lock.js';
 import { isWithinWatchHours, runShortageWatchRound } from '../src/services/shortage-watch-service.js';
 import { logger } from '../src/utils/logger.js';
@@ -25,7 +26,8 @@ async function main() {
   if (!release) return;
 
   try {
-    await withBigSellerPage('shortage-watch', (page) => runShortageWatchRound(page));
+    // The watch only reads the new-orders page, so its session check uses that page too.
+    await withBigSellerPage('shortage-watch', (page) => runShortageWatchRound(page), { preflightUrl: NEW_ORDERS_URL });
   } catch (error) {
     if (error instanceof SessionExpiredError) {
       // Logged only: the LINE group gets nothing but the pre-alert template (the older routine's rule).

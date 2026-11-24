@@ -233,11 +233,22 @@ async function hasValidSession(url: string): Promise<boolean> {
   }
 }
 
-export async function withBigSellerPage<T>(jobName: string, fn: (page: Page) => Promise<T>): Promise<T> {
+/**
+ * `options.preflightUrl` lets a job that only ever needs one page (the 10-minute shortage watch reads
+ * the new-orders page) run its session check on THAT page instead of the inventory page, so it does not
+ * touch a page it never uses. Every other caller keeps the inventory default.
+ */
+export async function withBigSellerPage<T>(
+  jobName: string,
+  fn: (page: Page) => Promise<T>,
+  options: { preflightUrl?: string } = {},
+): Promise<T> {
   assertStorageStateExists();
 
   const preflightUrl =
-    process.env.BIGSELLER_INVENTORY_URL ?? 'https://www.bigseller.com/web/inventory/warehouseInventory.htm';
+    options.preflightUrl ??
+    process.env.BIGSELLER_INVENTORY_URL ??
+    'https://www.bigseller.com/web/inventory/warehouseInventory.htm';
   if (!(await hasValidSession(preflightUrl))) {
     throw new SessionExpiredError(preflightUrl);
   }
