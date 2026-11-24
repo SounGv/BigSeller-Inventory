@@ -35,6 +35,8 @@ export interface ShelfRow {
   sku: string;
   shelfType: number;
   shelfName: string;
+  /** พื้นที่คลัง (warehouse zone) of the position, e.g. FANTECH, 3FL Ugreen. */
+  zoneName?: string;
   onhand: number;
   available: number;
 }
@@ -60,6 +62,8 @@ export interface RawOrder {
   id?: number | string;
   /** Which tab it came from: '0' = รอยืนยัน, '4' = ของขาด. */
   tab?: string;
+  /** BigSeller's platform code: shopee, lazada, tiktok, manual, ... */
+  platform?: string;
   warehouseId: number;
   shipmentWarehouse: string;
   carrier: string;
@@ -301,7 +305,7 @@ export async function fetchSnapshot(page: Page): Promise<{ pos: ShelfRow[]; orde
         'application/x-www-form-urlencoded; charset=UTF-8');
       if (j.code !== 0) throw new Error('stock ' + j.msg);
       tp = j.data.totalPage;
-      for (const x of j.data.rows) pos.push({ sku: x.sku || '', shelfType: x.shelfType, shelfName: x.shelfName || '', onhand: x.onhand || 0, available: x.available || 0 });
+      for (const x of j.data.rows) pos.push({ sku: x.sku || '', shelfType: x.shelfType, shelfName: x.shelfName || '', zoneName: x.zoneName || '', onhand: x.onhand || 0, available: x.available || 0 });
       pg++;
     } while (pg <= tp && pg < 40);
     // packState '0' = tab รอยืนยัน, '4' = tab ของขาด (BigSeller moves an order there once it cannot lock all its stock). Both are unconfirmed orders.
@@ -315,7 +319,7 @@ export async function fetchSnapshot(page: Page): Promise<{ pos: ShelfRow[]; orde
       if (j.code !== 0) throw new Error('orders ' + j.msg);
       tp = j.data.page.totalPage;
       for (const o of j.data.page.rows) if (!seenIds.has(o.id)) { seenIds.add(o.id); orders.push({
-        id: o.id, tab: packState, warehouseId: o.warehouseId, shipmentWarehouse: o.shipmentWarehouse || '',
+        id: o.id, tab: packState, platform: String(o.platform || ''), warehouseId: o.warehouseId, shipmentWarehouse: o.shipmentWarehouse || '',
         carrier: String(o.shippingCarrierName || ''), option: String(o.shippingConfigOptionName || ''),
         items: (o.orderItemList || []).map((it) => ({
           quantity: it.quantity || 0, allocated: it.allocated || 0, inventorySku: it.inventorySku || '',
