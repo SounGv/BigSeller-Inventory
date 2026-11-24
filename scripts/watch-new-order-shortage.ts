@@ -1,22 +1,17 @@
 import 'dotenv/config';
 import { withBigSellerPage } from '../src/utils/browser-runner.js';
 import { SessionExpiredError } from '../src/bigseller/auth.js';
-import { SheetsClient } from '../src/sheets/sheets-client.js';
 import { acquireBigSellerSessionLock } from '../src/utils/bigseller-session-lock.js';
-import {
-  announceSessionExpiredOncePerDay,
-  isWithinWatchHours,
-  runShortageWatchRound,
-} from '../src/services/shortage-watch-service.js';
+import { isWithinWatchHours, runShortageWatchRound } from '../src/services/shortage-watch-service.js';
 import { logger } from '../src/utils/logger.js';
 
 /**
- * 10-minute watch: new unconfirmed orders vs. what sits at the pick position,
- * announced to the LINE group when a SKU newly becomes short (see
- * src/services/shortage-watch-service.ts). Scheduled by
- * scripts/install-new-order-shortage-watch-task.ps1.
+ * 10-minute pre-check: new unconfirmed orders vs. the pick-position stock of
+ * STOCK_5, announced to the LINE group for urgent orders (see
+ * src/services/shortage-watch-service.ts). Read-only on BigSeller, writes no
+ * sheet. Scheduled by scripts/install-new-order-shortage-watch-task.ps1.
  *
- * FORCE_RUN=true skips the Mon–Sat 08:30–18:30 guard, for a manual DryRun at any hour.
+ * FORCE_RUN=true skips the Mon–Sat 08:00–17:55 guard, for a manual DryRun at any hour.
  */
 async function main() {
   const forced = (process.env.FORCE_RUN ?? 'false').toLowerCase() === 'true';
@@ -30,12 +25,11 @@ async function main() {
   if (!release) return;
 
   try {
-    const sheetsClient = await SheetsClient.create();
-    await withBigSellerPage('shortage-watch', (page) => runShortageWatchRound(page, sheetsClient));
+    await withBigSellerPage('shortage-watch', (page) => runShortageWatchRound(page));
   } catch (error) {
     if (error instanceof SessionExpiredError) {
+      // Logged only: the LINE group gets nothing but the pre-alert template (the older routine's rule).
       await logger.error('shortage-watch: BigSeller session expired — needs "npm run login:bigseller"');
-      await announceSessionExpiredOncePerDay();
       process.exitCode = 2;
       return;
     }

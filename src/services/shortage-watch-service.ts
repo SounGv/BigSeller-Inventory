@@ -1,133 +1,230 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Page } from '@playwright/test';
-import { SheetsClient } from '../sheets/sheets-client.js';
 import { ensureSessionValid } from '../bigseller/auth.js';
-import { BigSellerNewOrdersPage, NEW_ORDERS_URL } from '../bigseller/new-orders-page.js';
-import { selectFilterPill, setWarehouseFilter } from '../bigseller/new-orders-dom.js';
-import {
-  STOCK_CHECK_HEADERS,
-  buildStockCheckRows,
-  isRealPickPosition,
-  type PickPositionAgg,
-} from './order-stock-check-service.js';
-import { scrapeLocationRows } from './sync-service.js';
+import { NEW_ORDERS_URL } from '../bigseller/new-orders-page.js';
 import { sendLineGroupMessages } from './line-notify-service.js';
-import type { InventoryRow, NewOrderLineRow } from '../types.js';
 import { logger } from '../utils/logger.js';
 
-const SHEET_STOCK_CHECK_VIEW = process.env.SHEET_EMPLOYEE_STOCK_CHECK_VIEW ?? 'EMPLOYEE_STOCK_CHECK_VIEW';
-const SHEET_SKU_INVENTORY = process.env.SHEET_SKU_INVENTORY ?? 'DB_SKU_INVENTORY';
-const INVENTORY_URL = process.env.BIGSELLER_INVENTORY_URL ?? 'https://www.bigseller.com/web/inventory/warehouseInventory.htm';
-const WAREHOUSE_NAME = process.env.INVENTORY_WAREHOUSE_NAME ?? 'STOCK_5';
-const PICK_POSITION_TYPE = process.env.INVENTORY_POSITION_TYPE_NAME ?? 'ตำแหน่งหยิบสินค้า';
+/**
+ * Pre-check of NEW, UNCONFIRMED orders against the pick-position stock, every
+ * 10 minutes, announced to the LINE group — the rules of the older Claude-in-
+ * Chrome routine `neworder-pick-precheck` (bigseller-ops repo, NEWORDER_RUNBOOK.md),
+ * which the user asked to keep exactly (2026-11-24):
+ *
+ *  - Demand counts only what BigSeller has NOT locked yet (quantity - allocated),
+ *    because a waiting order already holds stock, and "available" at the pick
+ *    position already excludes that lock; counting the full quantity would count
+ *    it twice. Bundle lines (GIFT-...) are split into their child SKUs x num.
+ *  - Compared with the AVAILABLE stock of the pick positions of STOCK_5.
+ *  - LINE only for shortages that include an urgent / ship-first order, one SKU
+ *    once per day, one message of at most 15 SKUs (saves LINE quota).
+ *  - Read-only on BigSeller. It moves nothing.
+ */
 
-/** Only orders from these marketplaces count (confirmed by the user 2026-11-24); every other platform — manual orders, POS, WooCommerce, chat — is somebody else's process. */
-const WATCH_PLATFORMS = (process.env.WATCH_PLATFORMS ?? 'Shopee,Lazada,TikTok').split(',').map((s) => s.trim()).filter(Boolean);
-/** Only orders allocated to these warehouses count (confirmed by the user 2026-11-24): the picking warehouse and the online-sync warehouse. */
-const WATCH_WAREHOUSES = (process.env.WATCH_WAREHOUSES ?? 'STOCK_5,STOCK_ซิงก์ขายออนไลน์').split(',').map((s) => s.trim()).filter(Boolean);
+const STOCK5_WAREHOUSE_ID = Number(process.env.BIGSELLER_STOCK5_WAREHOUSE_ID ?? '49484');
+const STOCK5_WAREHOUSE_NAME = process.env.INVENTORY_WAREHOUSE_NAME ?? 'STOCK_5';
 
-/** LINE allows 5 bubbles per push; each lists this many SKUs, so a message never exceeds LINE's 5000-character limit. */
-const ITEMS_PER_BUBBLE = 20;
-const MAX_BUBBLES = 4;
+/** Carrier names that mean "ship first" — BigSeller gives no deadline, so the carrier name is the signal. SPX Express / J&T / Flash / KEX / LEX / Seller Delivery are NOT urgent. */
+export const URGENT_CARRIER = /Instant|ส่งทันที|Express Delivery|SHP Food|Food|Lalamove|Grab/i;
+const PREALERT_CAP = 15;
+const SEPARATOR = '━━━━━━━━━━━━━━';
+
+/** One row of BigSeller's shelf list (one SKU at one position). shelfType: 0 pick, 1 storage, 2 damaged/buffer. */
+export interface ShelfRow {
+  sku: string;
+  shelfType: number;
+  shelfName: string;
+  onhand: number;
+  available: number;
+}
+
+export interface StockEntry {
+  pickOn: number;
+  pickAv: number;
+  storOn: number;
+  damOn: number;
+  /** Stock sitting in the storage position named ZZZZ = still being produced, so not refillable yet. */
+  zzzz: number;
+}
+
+export interface RawOrderItem {
+  quantity: number;
+  allocated: number;
+  inventorySku: string;
+  group: { varSku: string; num: number }[];
+}
+
+export interface RawOrder {
+  warehouseId: number;
+  shipmentWarehouse: string;
+  carrier: string;
+  option: string;
+  items: RawOrderItem[];
+}
+
+export interface Demand {
+  demand: Record<string, number>;
+  urgent: Record<string, number>;
+  urgentBy: Record<string, Record<string, number>>;
+  ordersUsed: number;
+  urgentOrders: number;
+}
 
 export interface Shortage {
   sku: string;
-  orderDemandQty: number;
-  pickPositionQty: number;
-  short: number;
-  positions: string;
+  need: number;
+  pick: number;
+  gap: number;
+  storage: number;
+  zzzz: number;
+  urgent: number;
+  by: Record<string, number>;
 }
 
-export interface ShortageState {
-  /** SKUs already announced and still short. A SKU leaves this map the moment it stops being short, so a later recurrence is announced again. */
-  alerted: Record<string, { firstAlertedAt: string }>;
-  /** YYYY-MM-DD (Asia/Bangkok) of the last "session expired" notice, so that notice goes out at most once a day. */
-  lastSessionAlertDate?: string;
+export interface WatchState {
+  /** YYYY-MM-DD (Asia/Bangkok) the `sent` list belongs to; a new day starts a fresh list. */
+  date?: string;
+  sent: string[];
 }
 
-export interface AlertPlan {
-  toAlert: Shortage[];
-  /** How many currently-short SKUs were already announced earlier and are therefore not repeated. */
-  alreadyAlertedCount: number;
-  nextState: ShortageState;
-}
-
-/**
- * Pure: SKUs whose pending order quantity exceeds what sits at the pick
- * position — the same "แดง" rule as the morning sheet (see buildStockCheckRows),
- * returned worst-first so the biggest gap is at the top of the LINE message.
- */
-export function findShortages(
-  demandBySku: Map<string, number>,
-  pickAggBySku: Map<string, PickPositionAgg>,
-): Shortage[] {
-  const rows = buildStockCheckRows(demandBySku, pickAggBySku, new Map());
-  return rows
-    .filter((r) => r.status === 'แดง')
-    .map((r) => ({
-      sku: r.sku,
-      orderDemandQty: r.orderDemandQty,
-      pickPositionQty: r.pickPositionQty,
-      short: -r.shortfallOrSurplus,
-      positions: r.positions,
-    }))
-    .sort((a, b) => b.short - a.short || a.sku.localeCompare(b.sku));
-}
-
-/**
- * Pure: decides which shortages to announce this round and what to remember.
- *
- * A SKU is announced once when it first goes short. It is not repeated while it
- * stays short, and is forgotten the moment it stops being short, so if it runs
- * out again it is announced again. `limit` (> 0) caps how many are announced and
- * remembered this round — used by the DryRun ladder's small-slice step.
- */
-export function planShortageAlerts(
-  shortages: Shortage[],
-  state: ShortageState,
-  nowIso: string,
-  limit = 0,
-): AlertPlan {
-  const stillShort = new Set(shortages.map((s) => s.sku));
-  const fresh = shortages.filter((s) => !state.alerted[s.sku]);
-  const toAlert = limit > 0 ? fresh.slice(0, limit) : fresh;
-
-  const alerted: ShortageState['alerted'] = {};
-  for (const sku of Object.keys(state.alerted)) {
-    if (stillShort.has(sku)) alerted[sku] = state.alerted[sku];
+/** Pure: per-SKU totals over every position of the warehouse. */
+export function buildStockBySku(rows: ShelfRow[]): Record<string, StockEntry> {
+  const stock: Record<string, StockEntry> = {};
+  for (const x of rows) {
+    if (!x.sku) continue;
+    const e = (stock[x.sku] ??= { pickOn: 0, pickAv: 0, storOn: 0, damOn: 0, zzzz: 0 });
+    const on = x.onhand || 0;
+    if (x.shelfType === 0) {
+      e.pickOn += on;
+      e.pickAv += x.available || 0;
+    } else if (x.shelfType === 1) {
+      e.storOn += on;
+      if (x.shelfName === 'ZZZZ') e.zzzz += on;
+    } else if (x.shelfType === 2) {
+      e.damOn += on;
+    }
   }
-  for (const s of toAlert) alerted[s.sku] = { firstAlertedAt: nowIso };
-
-  return {
-    toAlert,
-    alreadyAlertedCount: shortages.length - fresh.length,
-    nextState: { ...state, alerted },
-  };
+  return stock;
 }
 
-/** Pure: the LINE bubbles for the announced SKUs (split so none gets too long). */
-export function buildShortageMessages(toAlert: Shortage[], hhmm: string): string[] {
-  if (toAlert.length === 0) return [];
-  const bubbles: string[] = [];
-  const shown = toAlert.slice(0, ITEMS_PER_BUBBLE * MAX_BUBBLES);
-  for (let i = 0; i < shown.length; i += ITEMS_PER_BUBBLE) {
-    const chunk = shown.slice(i, i + ITEMS_PER_BUBBLE);
-    const header =
-      i === 0
-        ? `⚠️ ของขาดตำแหน่งหยิบ (ออเดอร์ใหม่ยังไม่ยืนยัน) ${hhmm} — ${toAlert.length} รายการ`
-        : '(ต่อ)';
-    const lines = chunk.map((s) => {
-      const where = s.positions ? `  [${s.positions.split(', ')[0]}]` : '';
-      return `• ${s.sku}  สั่ง ${s.orderDemandQty} / ตำแหน่งหยิบมี ${s.pickPositionQty}  ขาด ${s.short}${where}`;
+/**
+ * Pure: what the unconfirmed orders of STOCK_5 still need from the pick
+ * position. Quantity already locked by BigSeller (`allocated`) is not counted
+ * again, and bundle lines become their child SKUs x num.
+ */
+export function buildDemand(orders: RawOrder[], warehouseId = STOCK5_WAREHOUSE_ID, warehouseName = STOCK5_WAREHOUSE_NAME): Demand {
+  const demand: Record<string, number> = {};
+  const urgent: Record<string, number> = {};
+  const urgentBy: Record<string, Record<string, number>> = {};
+  let ordersUsed = 0;
+  let urgentOrders = 0;
+
+  for (const o of orders) {
+    if (o.warehouseId !== warehouseId && o.shipmentWarehouse !== warehouseName) continue;
+    ordersUsed++;
+    const isUrgent = URGENT_CARRIER.test(`${o.carrier} ${o.option}`);
+    if (isUrgent) urgentOrders++;
+    const carrierName = o.carrier.replace(/^[A-Za-z]+-TH-/, '').replace(/^Instant Delivery - /, '').trim() || 'ด่วน';
+
+    for (const it of o.items) {
+      const remaining = Math.max(0, (it.quantity || 0) - Math.min(it.quantity || 0, it.allocated || 0));
+      if (remaining <= 0) continue;
+      const parts: [string, number][] = it.group.length
+        ? it.group.map((g) => [g.varSku, remaining * (g.num || 1)])
+        : it.inventorySku
+          ? [[it.inventorySku, remaining]]
+          : [];
+      for (const [sku, qty] of parts) {
+        demand[sku] = (demand[sku] ?? 0) + qty;
+        if (isUrgent) {
+          urgent[sku] = (urgent[sku] ?? 0) + qty;
+          const by = (urgentBy[sku] ??= {});
+          by[carrierName] = (by[carrierName] ?? 0) + qty;
+        }
+      }
+    }
+  }
+  return { demand, urgent, urgentBy, ordersUsed, urgentOrders };
+}
+
+/** Pure: every SKU whose remaining demand exceeds the available stock of its pick positions, biggest gap first. */
+export function findShortages(d: Demand, stock: Record<string, StockEntry>): Shortage[] {
+  const out: Shortage[] = [];
+  for (const [sku, need] of Object.entries(d.demand)) {
+    const e = stock[sku] ?? { pickOn: 0, pickAv: 0, storOn: 0, damOn: 0, zzzz: 0 };
+    const gap = need - e.pickAv;
+    if (gap <= 0) continue;
+    out.push({
+      sku,
+      need,
+      pick: e.pickAv,
+      gap,
+      storage: Math.max(0, e.storOn - e.zzzz),
+      zzzz: e.zzzz,
+      urgent: d.urgent[sku] ?? 0,
+      by: d.urgentBy[sku] ?? {},
     });
-    bubbles.push([header, ...lines].join('\n'));
   }
-  const hidden = toAlert.length - shown.length;
-  if (hidden > 0) {
-    bubbles[bubbles.length - 1] += `\n… และอีก ${hidden} รายการ ดูทั้งหมดในชีต ${SHEET_STOCK_CHECK_VIEW}`;
-  }
-  return bubbles;
+  return out.sort((a, b) => b.gap - a.gap || a.sku.localeCompare(b.sku));
+}
+
+/** Pure: the shortages that go to LINE — only those that include an urgent / ship-first order. */
+export function urgentShortagesOnly(shortages: Shortage[]): Shortage[] {
+  return shortages.filter((s) => s.urgent > 0);
+}
+
+/**
+ * Pure: one SKU is announced once per day. Every SKU that was new this round is
+ * remembered — including any beyond the 15 shown, which the message points to
+ * the sheet for (same as the older routine). `limit` (> 0) caps how many are
+ * announced and remembered, for the DryRun ladder's small-slice step.
+ */
+export function planPrealert(
+  urgentShortages: Shortage[],
+  state: WatchState,
+  today: string,
+  limit = 0,
+): { toAlert: Shortage[]; alreadyAlertedCount: number; nextState: WatchState } {
+  const sentToday = new Set(state.date === today ? state.sent : []);
+  const fresh = urgentShortages.filter((s) => !sentToday.has(s.sku));
+  const toAlert = limit > 0 ? fresh.slice(0, limit) : fresh;
+  const sent = [...new Set([...sentToday, ...toAlert.map((s) => s.sku)])].sort();
+  return { toAlert, alreadyAlertedCount: urgentShortages.length - fresh.length, nextState: { date: today, sent } };
+}
+
+/** Pure: the single LINE text, same template as the older routine's line_notify.py. `nowText` e.g. "🕐 24/11/2026 15:29 น.". */
+export function buildPrealertMessage(toAlert: Shortage[], nowText: string, cap = PREALERT_CAP): string | null {
+  if (toAlert.length === 0) return null;
+  const blocks = toAlert.slice(0, cap).map((s, i) => {
+    const refill: string[] = [];
+    if (s.storage > 0) refill.push(`✅ เติมจากที่จัดเก็บได้ ${s.storage.toLocaleString('en-US')} ชิ้น`);
+    if (s.zzzz > 0) refill.push(`⏳ รอของจาก ZZZZ ${s.zzzz.toLocaleString('en-US')} ชิ้น (ยังผลิตไม่เสร็จ)`);
+    if (refill.length === 0) refill.push('🚫 ที่จัดเก็บไม่มีของ ต้องหาของ');
+    const carriers = Object.keys(s.by).length
+      ? `🚚 ด่วน ${s.urgent.toLocaleString('en-US')} ชิ้น: ` +
+        Object.entries(s.by)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k} ${v.toLocaleString('en-US')}`)
+          .join(', ')
+      : s.urgent
+        ? `🚚 ด่วน ${s.urgent.toLocaleString('en-US')} ชิ้น`
+        : '';
+    return (
+      `${i + 1}) ${s.sku}\n` +
+      `ต้องใช้ ${s.need.toLocaleString('en-US')} ชิ้น\n` +
+      (carriers ? `${carriers}\n` : '') +
+      `ตำแหน่งหยิบมี ${s.pick.toLocaleString('en-US')} ชิ้น\n` +
+      `❗ ขาด ${s.gap.toLocaleString('en-US')} ชิ้น\n` +
+      refill.join('\n')
+    );
+  });
+  const more = toAlert.length > cap ? `\n\n…และอีก ${toAlert.length - cap} รุ่น ดูแท็บ "ออเดอร์ใหม่ vs ตำแหน่งหยิบ" ในชีต` : '';
+  const text =
+    `⏰ เร่งเติมตำแหน่งหยิบ\nออเดอร์ด่วน (ยังไม่ยืนยัน) ทำให้ของในตำแหน่งหยิบไม่พอ\n${nowText}\n\n${SEPARATOR}\n` +
+    blocks.join(`\n\n${SEPARATOR}\n`) +
+    more;
+  return text.slice(0, 4500);
 }
 
 const BANGKOK = 'Asia/Bangkok';
@@ -143,58 +240,35 @@ function bangkokParts(now: Date): { date: string; hhmm: string; weekday: string 
   return { date: `${get('year')}-${get('month')}-${get('day')}`, hhmm: `${hour}:${get('minute')}`, weekday: get('weekday') };
 }
 
-/** Pure: Mon–Sat, between the start and end times (inclusive), Asia/Bangkok — the same window as the full sync. */
-export function isWithinWatchHours(now: Date, start = '08:30', end = '18:30'): boolean {
+/** Pure: "🕐 DD/MM/YYYY HH:MM น." in Bangkok time. */
+export function formatNowText(now: Date): string {
+  const { date, hhmm } = bangkokParts(now);
+  const [y, m, d] = date.split('-');
+  return `🕐 ${d}/${m}/${y} ${hhmm} น.`;
+}
+
+/** Pure: Mon–Sat, from the start to the end time (inclusive), Asia/Bangkok — the older routine's 08:02–17:52 window. */
+export function isWithinWatchHours(now: Date, start = '08:00', end = '17:55'): boolean {
   const { hhmm, weekday } = bangkokParts(now);
   if (weekday === 'Sun') return false;
   return hhmm >= start && hhmm <= end;
 }
 
-/** Pure: collapses fresh BigSeller pick-position rows into one total per SKU, using the same filters as the sheet-based reader. */
-export function aggregatePickStock(rows: InventoryRow[]): Map<string, PickPositionAgg> {
-  const map = new Map<string, PickPositionAgg>();
-  for (const row of rows) {
-    if (row.warehouse !== WAREHOUSE_NAME || row.positionType !== PICK_POSITION_TYPE) continue;
-    if (!isRealPickPosition(row.position)) continue;
-    const sku = row.sku?.trim();
-    if (!sku) continue;
-    const agg = map.get(sku) ?? { stockAtPosition: 0, maxStock: 0, minStock: 0, positions: [] };
-    agg.stockAtPosition += Number(row.stockAtPosition) || 0;
-    agg.maxStock += Number(row.maxStock) || 0;
-    agg.minStock += Number(row.minStock) || 0;
-    if (!agg.positions.includes(row.position)) agg.positions.push(row.position);
-    map.set(sku, agg);
-  }
-  return map;
-}
-
-/** Pure: total order quantity per SKU across all pending (unconfirmed, non-LockStock) order lines. */
-export function sumDemandBySku(lines: Pick<NewOrderLineRow, 'sku' | 'qty'>[]): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const line of lines) {
-    const sku = line.sku?.trim();
-    const qty = Number(line.qty);
-    if (!sku || !Number.isFinite(qty)) continue;
-    map.set(sku, (map.get(sku) ?? 0) + qty);
-  }
-  return map;
-}
-
 // shortcut: state is one local JSON file on the machine that runs the job. If the watch ever runs on
-// two machines, move it into a Sheets tab so both see the same "already announced" list.
+// two machines, move it into a Sheets tab so both see the same "already announced today" list.
 const STATE_PATH = resolve(process.env.LOG_DIR ?? 'logs', 'shortage-watch-state.json');
 
-export function loadShortageState(path = STATE_PATH): ShortageState {
+export function loadWatchState(path = STATE_PATH): WatchState {
   try {
-    if (!existsSync(path)) return { alerted: {} };
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<ShortageState>;
-    return { alerted: parsed.alerted ?? {}, lastSessionAlertDate: parsed.lastSessionAlertDate };
+    if (!existsSync(path)) return { sent: [] };
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<WatchState>;
+    return { date: parsed.date, sent: Array.isArray(parsed.sent) ? parsed.sent : [] };
   } catch {
-    return { alerted: {} };
+    return { sent: [] };
   }
 }
 
-export function saveShortageState(state: ShortageState, path = STATE_PATH): void {
+export function saveWatchState(state: WatchState, path = STATE_PATH): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(state, null, 2));
 }
@@ -208,119 +282,96 @@ function canSendLine(): boolean {
 }
 
 /**
- * Reads the new, unconfirmed orders that count for the watch: marketplace
- * platforms only, allocated to the picking warehouse or the online-sync
- * warehouse only. The warehouse filter is verified by setWarehouseFilter itself
- * (it throws rather than scan an unknown scope), and the platform pill is read
- * back after every click by selectFilterPill.
- *
- * Both filters are put back to "ทั้งหมด" afterwards so the shared BigSeller
- * account is not left looking filtered to whoever opens the order page next.
- * LockStock reservations are manual orders, so the platform filter already
- * leaves them out.
+ * Read-only pull of the stock positions and the unconfirmed orders, through the
+ * same BigSeller endpoints the older routine used (confirmed live by it). Runs
+ * inside the already-logged-in page so the saved session is reused. Returns raw
+ * rows only; every calculation happens in the pure functions above.
  */
-export async function scrapeMarketplaceOrders(page: Page): Promise<NewOrderLineRow[]> {
-  await ensureSessionValid(page, NEW_ORDERS_URL);
-  const ordersPage = new BigSellerNewOrdersPage(page);
-  await ordersPage.goto();
+async function fetchSnapshot(page: Page): Promise<{ pos: ShelfRow[]; orders: RawOrder[] }> {
+  const browserCode = `(async (cfg) => {
+    const post = async (url, body, ct) => { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': ct }, body }); return r.json(); };
+    const pos = []; let pg = 1, tp = 1;
+    do {
+      const j = await post('/api/v1/inventory/wms/shelfZonePageList.json',
+        new URLSearchParams({ 'warehouseIdList[0]': String(cfg.warehouseId), hideZeroStockSku: 'false', openFlag: 'false', pageNo: String(pg), pageSize: '300', searchType: 'sku', inquireType: '1', searchContent: '' }).toString(),
+        'application/x-www-form-urlencoded; charset=UTF-8');
+      if (j.code !== 0) throw new Error('stock ' + j.msg);
+      tp = j.data.totalPage;
+      for (const x of j.data.rows) pos.push({ sku: x.sku || '', shelfType: x.shelfType, shelfName: x.shelfName || '', onhand: x.onhand || 0, available: x.available || 0 });
+      pg++;
+    } while (pg <= tp && pg < 40);
+    const orders = []; pg = 1; tp = 1;
+    do {
+      const j = await post('/api/v1/order/new/pageList.json',
+        JSON.stringify({ status: 'new', packState: '0', timeType: 1, searchType: 'orderNo', inquireType: 2, showLogisticsArr: 0, showStoreArr: 0, allOrder: false, historyOrder: false, desc: 1, orderBy: 'orderTime', pageNo: pg, pageSize: 200 }),
+        'application/json;charset=UTF-8');
+      if (j.code !== 0) throw new Error('orders ' + j.msg);
+      tp = j.data.page.totalPage;
+      for (const o of j.data.page.rows) orders.push({
+        warehouseId: o.warehouseId, shipmentWarehouse: o.shipmentWarehouse || '',
+        carrier: String(o.shippingCarrierName || ''), option: String(o.shippingConfigOptionName || ''),
+        items: (o.orderItemList || []).map((it) => ({
+          quantity: it.quantity || 0, allocated: it.allocated || 0, inventorySku: it.inventorySku || '',
+          group: (Array.isArray(it.varSkuGroupVoList) ? it.varSkuGroupVoList : []).filter((x) => x.varSku).map((x) => ({ varSku: x.varSku, num: x.num || 1 })),
+        })),
+      });
+      pg++;
+    } while (pg <= tp && pg < 30);
+    return { pos, orders };
+  })(${JSON.stringify({ warehouseId: STOCK5_WAREHOUSE_ID })})`;
 
-  const rows: NewOrderLineRow[] = [];
-  const seen = new Set<string>();
-  try {
-    await setWarehouseFilter(page, WATCH_WAREHOUSES);
-    for (const platform of WATCH_PLATFORMS) {
-      await selectFilterPill(page, 'แพลตฟอร์ม', platform);
-      for (const row of await ordersPage.scrapeCurrentFilterRows(platform)) {
-        const key = `${row.orderId || row.orderNo}::${row.sku}`;
-        if (seen.has(key)) continue; // an order can only sit on one platform, so this only guards against a page that did not refresh
-        seen.add(key);
-        rows.push({ ...row, platform });
-      }
-    }
-  } finally {
-    await selectFilterPill(page, 'แพลตฟอร์ม', 'ทั้งหมด').catch((e) => logger.warn(`shortage-watch: could not reset platform filter — ${(e as Error).message}`));
-    await setWarehouseFilter(page, 'all').catch((e) => logger.warn(`shortage-watch: could not reset warehouse filter — ${(e as Error).message}`));
-  }
-  await logger.info(`shortage-watch: ${rows.length} order line(s) from ${WATCH_PLATFORMS.join('+')} in ${WATCH_WAREHOUSES.join('+')}`);
-  return rows;
+  return (await page.evaluate(browserCode)) as { pos: ShelfRow[]; orders: RawOrder[] };
 }
 
 /**
- * One 10-minute round: reads the new unconfirmed orders, reads the pick-position
- * stock as it is right now, refreshes the staff stock-check sheet, and tells the
- * LINE group about SKUs that have newly become short.
- *
- * Does NOT write DB_LOCATION_CURRENT / DB_LOCATION_SNAPSHOT: the fresh pick
- * stock is used in memory only. Writing the snapshot every ten minutes would add
- * thousands of history rows a day; the 2-hourly full sync keeps owning those tabs.
+ * One 10-minute round. Read-only on BigSeller and writes no sheet: it reads the
+ * stock and the unconfirmed orders, works out which SKUs the orders will leave
+ * short at the pick position, and tells the LINE group about the ones that
+ * include an urgent order — once per SKU per day.
  */
-export async function runShortageWatchRound(page: Page, sheetsClient: SheetsClient): Promise<void> {
+export async function runShortageWatchRound(page: Page): Promise<void> {
   const testLimit = Number(process.env.TEST_LIMIT ?? 0) || 0;
   const now = new Date();
 
-  const pendingRows = await scrapeMarketplaceOrders(page);
-  // scrapeLocationRows expects the page to be on the inventory screen already (ensureSessionValid does that navigation), and syncOrderDemand just left it on the orders screen.
-  await ensureSessionValid(page, INVENTORY_URL);
-  const pickRows = await scrapeLocationRows(page, WAREHOUSE_NAME, PICK_POSITION_TYPE);
+  await ensureSessionValid(page, NEW_ORDERS_URL);
+  const { pos, orders } = await fetchSnapshot(page);
 
-  const demandBySku = sumDemandBySku(pendingRows);
-  const pickAggBySku = aggregatePickStock(pickRows);
-
-  // Whole-warehouse totals are a "nice to have" column on the sheet; the 2-hourly sync keeps this tab fresh enough.
-  const totalStockBySku = new Map<string, number>();
-  const skuRows = await sheetsClient.readAll(SHEET_SKU_INVENTORY);
-  if (skuRows.length > 1) {
-    const h = skuRows[0];
-    const [iSku, iWh, iTot] = [h.indexOf('sku'), h.indexOf('warehouse'), h.indexOf('totalWarehouseStock')];
-    for (const r of skuRows.slice(1)) {
-      if (iSku < 0 || iWh < 0 || iTot < 0 || r[iWh] !== WAREHOUSE_NAME) continue;
-      totalStockBySku.set(r[iSku], (totalStockBySku.get(r[iSku]) ?? 0) + (Number(r[iTot]) || 0));
-    }
+  const stock = buildStockBySku(pos);
+  // Same completeness check as the older routine: a short stock pull must never produce alerts.
+  if (Object.keys(stock).length < 500) {
+    throw new Error(`Stock pull looks incomplete (${Object.keys(stock).length} SKUs, ${pos.length} positions) — nothing announced`);
   }
 
-  const viewRows = buildStockCheckRows(demandBySku, pickAggBySku, totalStockBySku, now.toISOString());
-  await sheetsClient.replaceAll(SHEET_STOCK_CHECK_VIEW, [...STOCK_CHECK_HEADERS], viewRows);
+  const d = buildDemand(orders);
+  const shortages = findShortages(d, stock);
+  const urgentShortages = urgentShortagesOnly(shortages);
 
-  const shortages = findShortages(demandBySku, pickAggBySku);
-  const state = loadShortageState();
-  const plan = planShortageAlerts(shortages, state, now.toISOString(), testLimit);
-  const messages = buildShortageMessages(plan.toAlert, bangkokParts(now).hhmm);
+  const state = loadWatchState();
+  const plan = planPrealert(urgentShortages, state, bangkokParts(now).date, testLimit);
+  const message = buildPrealertMessage(plan.toAlert, formatNowText(now));
 
-  const skusWithoutPickPosition = [...demandBySku.keys()].filter((sku) => !pickAggBySku.has(sku)).length;
+  const skusWithoutStockRow = Object.keys(d.demand).filter((sku) => !stock[sku]).length;
   await logger.info(
-    `shortage-watch report: rows_in=${pendingRows.length} skus_with_demand=${demandBySku.size} ` +
-      `matched=${demandBySku.size - skusWithoutPickPosition} null_count(no pick position)=${skusWithoutPickPosition} ` +
-      `pick_skus=${pickAggBySku.size} shortages=${shortages.length} to_alert=${plan.toAlert.length} ` +
-      `skipped(already announced)=${plan.alreadyAlertedCount} dry_run=${DRY_RUN} line_enabled=${NOTIFY_ENABLED}`,
+    `shortage-watch report: rows_in=${orders.length} orders_used(STOCK_5)=${d.ordersUsed} urgent_orders=${d.urgentOrders} ` +
+      `skus_with_demand=${Object.keys(d.demand).length} matched=${Object.keys(d.demand).length - skusWithoutStockRow} ` +
+      `null_count(no stock row)=${skusWithoutStockRow} stock_skus=${Object.keys(stock).length} positions=${pos.length} ` +
+      `shortages_all=${shortages.length} shortages_urgent=${urgentShortages.length} to_alert=${plan.toAlert.length} ` +
+      `skipped(already announced today)=${plan.alreadyAlertedCount} dry_run=${DRY_RUN} line_enabled=${NOTIFY_ENABLED}`,
   );
   await logger.info(`shortage-watch sample_diff: ${JSON.stringify(plan.toAlert.slice(0, 5))}`);
 
-  if (messages.length === 0) return;
+  if (!message) return;
 
   if (!canSendLine()) {
-    await logger.info(`[no LINE sent — dry_run=${DRY_RUN}, line_enabled=${NOTIFY_ENABLED}] message would be:\n${messages.join('\n---\n')}`);
+    await logger.info(`[no LINE sent — dry_run=${DRY_RUN}, line_enabled=${NOTIFY_ENABLED}] message would be:\n${message}`);
     return; // state is NOT saved, so the same SKUs are announced when sending is really on
   }
 
-  const result = await sendLineGroupMessages(messages);
+  const result = await sendLineGroupMessages([message]);
   if (!result.ok) {
     await logger.error(`shortage-watch: LINE send failed, will retry next round — ${result.errorMessage}`);
     return; // state not saved => same SKUs are retried
   }
-  saveShortageState(plan.nextState);
+  saveWatchState(plan.nextState);
   await logger.info(`shortage-watch: announced ${plan.toAlert.length} SKU(s) (requestId ${result.requestId ?? '-'})`);
-}
-
-/** Tells the group once a day that BigSeller needs a manual re-login, instead of failing silently every ten minutes. */
-export async function announceSessionExpiredOncePerDay(now = new Date()): Promise<void> {
-  const state = loadShortageState();
-  const today = bangkokParts(now).date;
-  if (state.lastSessionAlertDate === today) return;
-  if (!canSendLine()) {
-    await logger.info('[no LINE sent] BigSeller session expired — would announce once today');
-    return;
-  }
-  const result = await sendLineGroupMessages(['🔒 BigSeller session หมดอายุ ระบบเฝ้าของขาดหยุดชั่วคราว ต้องล็อกอินใหม่ด้วย npm run login:bigseller']);
-  if (result.ok) saveShortageState({ ...state, lastSessionAlertDate: today });
-  else await logger.error(`shortage-watch: could not announce session expiry — ${result.errorMessage}`);
 }
