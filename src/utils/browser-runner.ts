@@ -7,6 +7,7 @@ import {
   installAutomationStealth,
   installLanguageGuideSuppressor,
   ensureSessionValid,
+  checkIsLoggedIn,
   SessionExpiredError,
 } from '../bigseller/auth.js';
 import { logger } from './logger.js';
@@ -204,6 +205,28 @@ async function logDebugResponse(response: Response): Promise<void> {
  * trace: 'on-first-retry' convention for the Playwright test runner.
  */
 /**
+ * Writes the session cookies this browser ended with back to the saved session file.
+ *
+ * BigSeller sends a fresh `Set-Cookie: JSESSIONID` on nearly every authenticated response
+ * (confirmed live 2026-08-27, see scripts/session-keeper.ts). Every job starts from the saved
+ * snapshot and used to throw the refreshed cookie away when its browser closed, so the next job
+ * started from a cookie the server had already replaced; a test that kept one context and re-saved
+ * it after each ping survived well past the usual expiry. Saving after each successful job is that
+ * same idea for the scheduled jobs.
+ *
+ * Only done when the page still reports itself logged in, so an expired session can never
+ * overwrite a good file. Best effort: a failure here must never fail the job.
+ */
+async function saveRefreshedSession(context: BrowserContext, page: Page): Promise<void> {
+  try {
+    if (!(await checkIsLoggedIn(page))) return;
+    await context.storageState({ path: getStorageStatePath() });
+  } catch (error) {
+    await logger.warn(`could not save the refreshed BigSeller session: ${(error as Error).message}`);
+  }
+}
+
+/**
  * Quick, invisible (always headless, regardless of BIGSELLER_HEADLESS) check for
  * whether the saved session is still good — used to decide whether it's worth
  * opening the real, visible browser at all.
@@ -224,9 +247,11 @@ async function hasValidSession(url: string): Promise<boolean> {
   });
   try {
     const page = await context.newPage();
-    return await ensureSessionValid(page, url)
+    const valid = await ensureSessionValid(page, url)
       .then(() => true)
       .catch(() => false);
+    if (valid) await saveRefreshedSession(context, page);
+    return valid;
   } finally {
     await context.close();
     await browser.close();
@@ -275,7 +300,9 @@ export async function withBigSellerPage<T>(
       }
 
       try {
-        return await fn(page);
+        const result = await fn(page);
+        await saveRefreshedSession(context, page);
+        return result;
       } catch (error) {
         lastError = error;
         if (error instanceof Error && error.name === 'SessionExpiredError') {
