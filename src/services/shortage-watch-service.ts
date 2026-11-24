@@ -56,6 +56,10 @@ export interface RawOrderItem {
 }
 
 export interface RawOrder {
+  /** BigSeller's own order id; an order is counted once even if two tabs listed it. */
+  id?: number | string;
+  /** Which tab it came from: '0' = รอยืนยัน, '4' = ของขาด. */
+  tab?: string;
   warehouseId: number;
   shipmentWarehouse: string;
   carrier: string;
@@ -300,23 +304,27 @@ export async function fetchSnapshot(page: Page): Promise<{ pos: ShelfRow[]; orde
       for (const x of j.data.rows) pos.push({ sku: x.sku || '', shelfType: x.shelfType, shelfName: x.shelfName || '', onhand: x.onhand || 0, available: x.available || 0 });
       pg++;
     } while (pg <= tp && pg < 40);
-    const orders = []; pg = 1; tp = 1;
+    // packState '0' = tab รอยืนยัน, '4' = tab ของขาด (BigSeller moves an order there once it cannot lock all its stock). Both are unconfirmed orders.
+    const orders = []; const seenIds = new Set();
+    for (const packState of ['0', '4']) {
+    pg = 1; tp = 1;
     do {
       const j = await post('/api/v1/order/new/pageList.json',
-        JSON.stringify({ status: 'new', packState: '0', timeType: 1, searchType: 'orderNo', inquireType: 2, showLogisticsArr: 0, showStoreArr: 0, allOrder: false, historyOrder: false, desc: 1, orderBy: 'orderTime', pageNo: pg, pageSize: 200 }),
+        JSON.stringify({ status: 'new', packState, timeType: 1, searchType: 'orderNo', inquireType: 2, showLogisticsArr: 0, showStoreArr: 0, allOrder: false, historyOrder: false, desc: 1, orderBy: 'orderTime', pageNo: pg, pageSize: 200 }),
         'application/json;charset=UTF-8');
       if (j.code !== 0) throw new Error('orders ' + j.msg);
       tp = j.data.page.totalPage;
-      for (const o of j.data.page.rows) orders.push({
-        warehouseId: o.warehouseId, shipmentWarehouse: o.shipmentWarehouse || '',
+      for (const o of j.data.page.rows) if (!seenIds.has(o.id)) { seenIds.add(o.id); orders.push({
+        id: o.id, tab: packState, warehouseId: o.warehouseId, shipmentWarehouse: o.shipmentWarehouse || '',
         carrier: String(o.shippingCarrierName || ''), option: String(o.shippingConfigOptionName || ''),
         items: (o.orderItemList || []).map((it) => ({
           quantity: it.quantity || 0, allocated: it.allocated || 0, inventorySku: it.inventorySku || '',
           group: (Array.isArray(it.varSkuGroupVoList) ? it.varSkuGroupVoList : []).filter((x) => x.varSku).map((x) => ({ varSku: x.varSku, num: x.num || 1 })),
         })),
-      });
+      }); }
       pg++;
     } while (pg <= tp && pg < 30);
+    }
     return { pos, orders };
   })(${JSON.stringify({ warehouseId: STOCK5_WAREHOUSE_ID })})`;
 
@@ -352,7 +360,7 @@ export async function runShortageWatchRound(page: Page): Promise<void> {
 
   const skusWithoutStockRow = Object.keys(d.demand).filter((sku) => !stock[sku]).length;
   await logger.info(
-    `shortage-watch report: rows_in=${orders.length} orders_used(STOCK_5)=${d.ordersUsed} urgent_orders=${d.urgentOrders} ` +
+    `shortage-watch report: rows_in=${orders.length} (tab ของขาด=${orders.filter((o) => o.tab === '4').length}) orders_used(STOCK_5)=${d.ordersUsed} urgent_orders=${d.urgentOrders} ` +
       `skus_with_demand=${Object.keys(d.demand).length} matched=${Object.keys(d.demand).length - skusWithoutStockRow} ` +
       `null_count(no stock row)=${skusWithoutStockRow} stock_skus=${Object.keys(stock).length} positions=${pos.length} ` +
       `shortages_all=${shortages.length} shortages_urgent=${urgentShortages.length} to_alert=${plan.toAlert.length} ` +
