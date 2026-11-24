@@ -22,6 +22,7 @@
     "sync:best-sellers": "tsx scripts/sync-best-sellers.ts",
     "sync:warehouse-stock-count": "tsx scripts/sync-warehouse-stock-count.ts",
     "sync:order-stock-check": "tsx scripts/sync-order-stock-check.ts",
+    "watch:new-order-shortage": "tsx scripts/watch-new-order-shortage.ts",
     "sync:sku-inventory": "tsx scripts/sync-sku-inventory.ts",
     "sync:decoy-warehouse-inventory": "tsx scripts/sync-decoy-warehouse-inventory.ts",
     "sync:other-warehouses-inventory": "tsx scripts/sync-other-warehouses-inventory.ts",
@@ -47,7 +48,7 @@
     "keep-alive": "tsx scripts/session-keeper.ts",
     "wave-engine": "tsx scripts/wave-engine.ts",
     "test": "playwright test",
-    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts tests/wave-engine-tiers.spec.ts tests/cancelled-stock-not-deducted.spec.ts tests/sales-summary-no-data.spec.ts tests/transfer-tracking.spec.ts"
+    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts tests/wave-engine-tiers.spec.ts tests/cancelled-stock-not-deducted.spec.ts tests/shortage-watch.spec.ts tests/sales-summary-no-data.spec.ts tests/transfer-tracking.spec.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.4",

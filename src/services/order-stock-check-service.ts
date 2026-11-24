@@ -25,7 +25,7 @@ export const STOCK_CHECK_HEADERS = [
 
 export type StockCheckStatus = 'แดง' | 'ส้ม' | 'ปกติ';
 
-interface PickPositionAgg {
+export interface PickPositionAgg {
   stockAtPosition: number;
   maxStock: number;
   minStock: number;
@@ -113,6 +113,51 @@ async function readOrderDemandBySku(sheetsClient: SheetsClient): Promise<Map<str
 }
 
 /**
+ * Pure per-SKU judgment shared by the morning sheet job and the 10-minute
+ * shortage watch, so "แดง" can never mean two different things. No I/O.
+ *
+ * Sorted by SKU (per explicit user request 2026-09-09: "ใส่ตัวกรอง เรียง sku
+ * หรือ ตำแหน่ง ถ้าจะให้หาง่ายๆ") so staff can find a specific model quickly —
+ * urgency is still visible at a glance via the red/ส้ม row color from
+ * migrate-sheet-for-order-stock-check.ts, and the sheet's native filter
+ * (also added there) lets staff re-sort by any column, including
+ * `positions`, themselves without needing this script changed again.
+ */
+export function buildStockCheckRows(
+  demandBySku: Map<string, number>,
+  pickAggBySku: Map<string, PickPositionAgg>,
+  totalStockBySku: Map<string, number>,
+  updatedAt: string = new Date().toISOString(),
+) {
+  const rows = [...demandBySku.entries()].map(([sku, orderDemandQty]) => {
+    const pick = pickAggBySku.get(sku) ?? { stockAtPosition: 0, maxStock: 0, minStock: 0, positions: [] };
+    const shortfallOrSurplus = pick.stockAtPosition - orderDemandQty;
+    const status: StockCheckStatus =
+      shortfallOrSurplus < 0 ? 'แดง' : shortfallOrSurplus < pick.minStock ? 'ส้ม' : 'ปกติ';
+
+    return {
+      sku,
+      positions: pick.positions.join(', '),
+      orderDemandQty,
+      pickPositionQty: pick.stockAtPosition,
+      pickMaxStock: pick.maxStock,
+      pickMinStock: pick.minStock,
+      totalWarehouseStock: totalStockBySku.get(sku) ?? 0,
+      shortfallOrSurplus,
+      status,
+      updatedAt,
+    };
+  });
+  rows.sort((a, b) => a.sku.localeCompare(b.sku));
+  return rows;
+}
+
+/** True for a real pick position — not the "no pick position" or gift-position placeholders. Same rule the sheet-based reader above applies. */
+export function isRealPickPosition(position: string): boolean {
+  return !position.includes(NO_PICK_POSITION_MARKER) && !position.includes(GIFT_POSITION_MARKER);
+}
+
+/**
  * Morning stock-sufficiency check for staff, per explicit user request
  * (2026-09-09): every SKU appearing in today's new/unconfirmed orders
  * (DB_PENDING_ORDER_DEMAND), compared against what is physically sitting at
@@ -140,34 +185,7 @@ export async function syncOrderStockCheck(sheetsClient: SheetsClient): Promise<v
     readOrderDemandBySku(sheetsClient),
   ]);
 
-  const updatedAt = new Date().toISOString();
-  const rows = [...demandBySku.entries()].map(([sku, orderDemandQty]) => {
-    const pick = pickAggBySku.get(sku) ?? { stockAtPosition: 0, maxStock: 0, minStock: 0, positions: [] };
-    const shortfallOrSurplus = pick.stockAtPosition - orderDemandQty;
-    const status: StockCheckStatus =
-      shortfallOrSurplus < 0 ? 'แดง' : shortfallOrSurplus < pick.minStock ? 'ส้ม' : 'ปกติ';
-
-    return {
-      sku,
-      positions: pick.positions.join(', '),
-      orderDemandQty,
-      pickPositionQty: pick.stockAtPosition,
-      pickMaxStock: pick.maxStock,
-      pickMinStock: pick.minStock,
-      totalWarehouseStock: totalStockBySku.get(sku) ?? 0,
-      shortfallOrSurplus,
-      status,
-      updatedAt,
-    };
-  });
-
-  // Sorted by SKU (per explicit user request 2026-09-09: "ใส่ตัวกรอง เรียง sku
-  // หรือ ตำแหน่ง ถ้าจะให้หาง่ายๆ") so staff can find a specific model quickly —
-  // urgency is still visible at a glance via the red/ส้ม row color from
-  // migrate-sheet-for-order-stock-check.ts, and the sheet's native filter
-  // (also added there) lets staff re-sort by any column, including
-  // `positions`, themselves without needing this script changed again.
-  rows.sort((a, b) => a.sku.localeCompare(b.sku));
+  const rows = buildStockCheckRows(demandBySku, pickAggBySku, totalStockBySku);
 
   await sheetsClient.replaceAll(SHEET_STOCK_CHECK_VIEW, [...STOCK_CHECK_HEADERS], rows);
 

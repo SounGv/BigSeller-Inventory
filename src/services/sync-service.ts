@@ -81,7 +81,7 @@ async function logSync(entry: Omit<SyncLogEntry, 'timestamp'>, sheetsClient: She
 }
 
 /** One position-type export via the location-level page, with no Sheets writes — the shared building block for both `syncInventory` (pick positions only, for the existing employee-facing pipeline) and `syncLocationAllTypes` (every type, for the transfer-plan feature which needs storage positions as move sources). */
-async function scrapeLocationRows(page: Page, warehouse: string, positionType: string): Promise<InventoryRow[]> {
+export async function scrapeLocationRows(page: Page, warehouse: string, positionType: string): Promise<InventoryRow[]> {
   // ensureSessionValid (called by the caller) already navigated to INVENTORY_URL
   // as part of its check. Navigating to the identical URL again immediately can
   // race with BigSeller's client-side routing (observed live: intermittent

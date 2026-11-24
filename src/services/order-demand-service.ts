@@ -60,7 +60,7 @@ function classifyLockStatus(row: NewOrderLineRow): LockStatus {
  * reflect current state at sync time, so a closed/confirmed order
  * disappears automatically on the next sync (see SheetsClient.replaceAll).
  */
-export async function syncOrderDemand(page: Page, sheetsClient: SheetsClient, runId: string): Promise<void> {
+export async function syncOrderDemand(page: Page, sheetsClient: SheetsClient, runId: string): Promise<{ pendingRows: NewOrderLineRow[] }> {
   await ensureSessionValid(page, NEW_ORDERS_URL);
 
   const ordersPage = new BigSellerNewOrdersPage(page);
@@ -120,6 +120,9 @@ export async function syncOrderDemand(page: Page, sheetsClient: SheetsClient, ru
   }
 
   void runId; // kept in the signature to match every other sync*() function's shape in this project, even though these two sheets don't stamp it (see SheetsClient.replaceAll doc comment — they hold current state, not a per-run history)
+
+  // Returned so a caller that needs this run's own scrape (the shortage watch, which must also work under DRY_RUN where the sheet is never rewritten) does not have to re-read a possibly stale sheet. Existing callers ignore it.
+  return { pendingRows };
 }
 
 /**
