@@ -5,6 +5,7 @@ import { exportMoveFiles } from '../src/services/move-export-service.js';
 import { validateMoveFiles } from '../src/services/move-validation-service.js';
 import { importFiles, updateTransferPlanStatus } from '../src/services/import-moves-service.js';
 import { notifyTransferBillCreated } from '../src/services/line-notify-service.js';
+import { recordPendingDocuments, sendTrackingPrompt } from '../src/services/transfer-tracking-service.js';
 import { logger } from '../src/utils/logger.js';
 
 const WAREHOUSE_NAME = process.env.INVENTORY_WAREHOUSE_NAME ?? 'STOCK_5';
@@ -75,6 +76,11 @@ async function main() {
       totalMoveQty,
       documents,
     });
+
+    // Per explicit user request (2026-11-19): offer per-run status tracking
+    // right after the creation report — see transfer-tracking-service.ts.
+    await recordPendingDocuments(sheetsClient, runId, documents);
+    await sendTrackingPrompt(runId, documents.length);
   }
 
   if (failed.length > 0) process.exit(1);

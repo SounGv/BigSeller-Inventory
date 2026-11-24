@@ -176,3 +176,28 @@ export interface TransferNotificationLogRow {
   lineRequestId: string;
   errorMessage: string;
 }
+
+/** BigSeller's own "ย้ายสินค้า" document lifecycle states — see BigSellerMovingGoodsPage.MOVING_STATE_LABELS for the confirmed state-code mapping (NOT the same order as the UI's own tabs). */
+export type MoveDocumentStatus =
+  | 'รอนำเข้า'
+  | 'รอหยิบสินค้า'
+  | 'กำลังหยิบสินค้า'
+  | 'กำลังนำเข้าชั้นวาง'
+  | 'เสร็จเรียบร้อย'
+  | 'ยกเลิก'
+  | 'ไม่ทราบ';
+
+/** Whether staff answered the post-creation "ติดตามใบนี้ไหม" LINE prompt for this document's runId yet. */
+export type TrackDecision = 'pending' | 'yes' | 'no';
+
+/** One row per live BigSeller transfer document ("ใบย้ายสินค้า") our own automation created — written right after creation (see transfer-tracking-service.ts) so a later scheduled check can look its status up by `documentNumber` without needing the in-memory DocumentInfo list from the run that created it. */
+export interface TransferTrackingRow {
+  runId: string;
+  documentNumber: string;
+  sourcePosition: string;
+  trackDecision: TrackDecision;
+  status: MoveDocumentStatus;
+  createdAt: string;
+  lastCheckedAt: string;
+  completedAt: string;
+}

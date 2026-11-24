@@ -26,3 +26,8 @@ secrets/
 
 # Local Claude Code config (personal, not project-scoped)
 .claude/
+
+# Local backups, archives and tool scratch
+*.bak-*
+*.zip
+.uix/

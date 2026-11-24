@@ -2,10 +2,11 @@ import type { Page } from '@playwright/test';
 import { BigSellerInventoryPage } from '../bigseller/inventory-page.js';
 import { BigSellerSkuInventoryPage } from '../bigseller/sku-inventory-page.js';
 import { ensureSessionValid } from '../bigseller/auth.js';
-import { SupabaseDbClient } from '../db/supabase-db-client.js';
+import { SheetsClient } from '../sheets/sheets-client.js';
 import { logger } from '../utils/logger.js';
 
-const TABLE = 'decoy_reconciliation_exceptions';
+const SHEET_DECOY_RECONCILIATION_EXCEPTIONS = process.env.SHEET_DECOY_RECONCILIATION_EXCEPTIONS ?? 'DECOY_RECONCILIATION_EXCEPTIONS';
+const HEADERS = ['sku', 'decoyQty', 'damagedPositionQty', 'discrepancy', 'detectedAt', 'sourceUrl'] as const;
 const REAL_WAREHOUSE = 'STOCK_5';
 const DAMAGED_POSITION_TYPE = 'ตำแหน่งวางสินค้าชำรุด';
 const DECOY_WAREHOUSE = 'STOCK_ซิงก์ขายออนไลน์';
@@ -31,8 +32,15 @@ const DECOY_WAREHOUSE = 'STOCK_ซิงก์ขายออนไลน์';
  * already has a confirmed `selectPositionType('ตำแหน่งวางสินค้าชำรุด')`
  * filter) for the real damaged-position qty, and `BigSellerSkuInventoryPage`
  * (SKU-level totals) filtered to the decoy warehouse for its mirrored qty.
+ *
+ * Moved from Supabase to Google Sheets (2026-11-09) — the Supabase project
+ * this originally wrote to (`decoy_reconciliation_exceptions`) was deleted
+ * (free-tier storage limit) with no replacement decided yet for a
+ * transactional backend, and this feature has no staff-editable overlay to
+ * worry about (unlike transfer-in-transit-service.ts), so a plain
+ * current-state Sheets tab is a direct, lossless replacement.
  */
-export async function syncDecoyReconciliation(page: Page): Promise<void> {
+export async function syncDecoyReconciliation(page: Page, sheetsClient: SheetsClient): Promise<void> {
   const start = Date.now();
   const inventoryUrl = 'https://www.bigseller.com/web/inventory/warehouseInventory.htm';
   await ensureSessionValid(page, inventoryUrl);
@@ -60,24 +68,23 @@ export async function syncDecoyReconciliation(page: Page): Promise<void> {
   await logger.info(`syncDecoyReconciliation: ${decoyRows.length} SKU(s) in decoy warehouse ${DECOY_WAREHOUSE}`);
 
   const allSkus = new Set([...damagedBySku.keys(), ...decoyBySku.keys()]);
-  const mismatches = [];
+  const mismatches: Record<string, string | number>[] = [];
   for (const sku of allSkus) {
     const damagedQty = damagedBySku.get(sku) ?? 0;
     const decoyQty = decoyBySku.get(sku) ?? 0;
     if (damagedQty !== decoyQty) {
       mismatches.push({
         sku,
-        decoy_qty: decoyQty,
-        damaged_position_qty: damagedQty,
+        decoyQty,
+        damagedPositionQty: damagedQty,
         discrepancy: decoyQty - damagedQty,
-        detected_at: new Date().toISOString(),
-        source_url: 'https://www.bigseller.com/web/inventory/warehouseInventory.htm',
+        detectedAt: new Date().toISOString(),
+        sourceUrl: 'https://www.bigseller.com/web/inventory/warehouseInventory.htm',
       });
     }
   }
 
-  const supabase = SupabaseDbClient.create();
-  await supabase.replaceAll(TABLE, mismatches);
+  await sheetsClient.replaceAll(SHEET_DECOY_RECONCILIATION_EXCEPTIONS, [...HEADERS], mismatches);
 
   await logger.info(
     `syncDecoyReconciliation: ${allSkus.size} SKU(s) compared, ${mismatches.length} mismatch(es) found, done in ${Date.now() - start}ms`,

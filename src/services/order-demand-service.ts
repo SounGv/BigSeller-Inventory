@@ -107,7 +107,17 @@ export async function syncOrderDemand(page: Page, sheetsClient: SheetsClient, ru
     })),
   );
 
-  await dualWriteToSupabase(pendingRows, lockRows);
+  try {
+    await dualWriteToSupabase(pendingRows, lockRows);
+  } catch (error) {
+    // Confirmed with the user (2026-11-09): the Supabase project was
+    // deliberately deleted (free-tier storage limit) and its replacement is
+    // not decided yet. Sheets is the real source of truth for this pipeline
+    // (see the doc comment below) — a dead/unreachable Supabase must not
+    // crash a sync that otherwise fully succeeded, any more than it being
+    // merely unconfigured does above.
+    await logger.error(`dualWriteToSupabase failed — continuing Sheets-only: ${(error as Error).message}`);
+  }
 
   void runId; // kept in the signature to match every other sync*() function's shape in this project, even though these two sheets don't stamp it (see SheetsClient.replaceAll doc comment — they hold current state, not a per-run history)
 }

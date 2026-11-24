@@ -1,6 +1,7 @@
 import { SheetsClient } from '../sheets/sheets-client.js';
 import type { TransferPlanRow, TransferExceptionRow } from '../types.js';
 import { readRowsForRunId } from './run-data.js';
+import { logger } from '../utils/logger.js';
 
 const SHEET_LOCATION_CURRENT = process.env.SHEET_LOCATION_CURRENT ?? 'DB_LOCATION_CURRENT';
 const SHEET_SKU_INVENTORY = process.env.SHEET_SKU_INVENTORY ?? 'DB_SKU_INVENTORY';
@@ -41,16 +42,27 @@ function isCartonEligiblePosition(position: string): boolean {
 }
 
 /**
- * Rounds `qty` to the nearest whole multiple of `cartonSize` — exactly half
- * a carton rounds up. Per user request (2026-08-25): "ปัดตามเศษ (≥ครึ่งลัง
- * ปัดขึ้น)" — e.g. needing 45 units at 10/carton rounds to 5 cartons (50),
- * needing 44 rounds to 4 cartons (40). Deliberately allowed to round the
- * final quantity above `maxStock` or below it — the user explicitly chose
- * this over a "never exceed max" / "never go under" rule.
+ * Floors `qty` down to the nearest whole multiple of `cartonSize`.
+ * Still used to cap a SOURCE line at whole cartons the source actually has
+ * (never a part-carton, never reserved stock).
  */
-export function roundToCartonMultiple(qty: number, cartonSize: number): number {
+export function floorToCartonMultiple(qty: number, cartonSize: number): number {
   if (cartonSize <= 0) return qty;
-  return Math.round(qty / cartonSize) * cartonSize;
+  return Math.floor(qty / cartonSize) * cartonSize;
+}
+
+/**
+ * Rounds `qty` UP to the next whole multiple of `cartonSize`.
+ * Per explicit user request (2026-11-14): in carton zones, the TARGET need
+ * is rounded up (e.g. need 40, carton 44 → move 44). Do not drop a line
+ * just because the raw need is under 1 carton. Exceeding maxStock by less
+ * than one carton is acceptable. A SKU with no carton size in
+ * DB_SKU_CARTON_QTY is not guessed here.
+ */
+export function ceilToCartonMultiple(qty: number, cartonSize: number): number {
+  if (cartonSize <= 0) return qty;
+  if (qty <= 0) return 0;
+  return Math.ceil(qty / cartonSize) * cartonSize;
 }
 
 /**
@@ -187,6 +199,12 @@ const MIN_REPLENISH_QTY = 5;
  * position-level lock already handled in `findSourcePositions` below (which
  * excludes a specific position's own lockedStock via `availableStock`).
  */
+export interface MissingCartonSizeRow {
+  sku: string;
+  targetPosition: string;
+  rawReplenishableQty: number;
+}
+
 export function computeReplenishmentCandidates(
   locationRows: Record<string, string>[],
   skuWarehouseStockBySku: Map<string, SkuWarehouseStock>,
@@ -201,6 +219,7 @@ export function computeReplenishmentCandidates(
    * means no filter — every zone is considered, same as before this existed.
    */
   targetZonePrefix?: string,
+  missingCartonSize?: MissingCartonSizeRow[],
 ): ReplenishCandidate[] {
   const candidates: ReplenishCandidate[] = [];
   const normalizedZonePrefix = targetZonePrefix?.toUpperCase();
@@ -218,17 +237,26 @@ export function computeReplenishmentCandidates(
     if (rawReplenishableQty <= MIN_REPLENISH_QTY) continue;
 
     // Carton rounding only applies to zones that can physically hold a full
-    // carton, and only when this SKU has a known carton size — a SKU with no
-    // row in DB_SKU_CARTON_QTY (the common case until someone fills it in)
-    // keeps the normal per-unit quantity unchanged.
+    // carton, and only when this SKU has a known carton size. Per user
+    // request (2026-11-14), TARGET need is rounded UP to whole cartons
+    // (need 40, carton 44 → 44) and is not dropped when the raw need is
+    // under 1 carton. A carton-zone SKU with no size in DB_SKU_CARTON_QTY
+    // is listed, not guessed as a per-unit move.
     let replenishableQty = rawReplenishableQty;
     let cartonQty: number | undefined;
     if (isCartonEligiblePosition(row.position)) {
       const knownCartonQty = cartonQtyBySku.get(row.sku);
       if (knownCartonQty && knownCartonQty > 1) {
         cartonQty = knownCartonQty;
-        replenishableQty = roundToCartonMultiple(rawReplenishableQty, cartonQty);
-        if (replenishableQty <= 0) continue; // rounded down to zero cartons — nothing to do this round
+        replenishableQty = ceilToCartonMultiple(rawReplenishableQty, cartonQty);
+        if (replenishableQty <= 0) continue;
+      } else if (missingCartonSize) {
+        missingCartonSize.push({
+          sku: row.sku,
+          targetPosition: row.position,
+          rawReplenishableQty,
+        });
+        continue;
       }
     }
 
@@ -578,13 +606,50 @@ export async function planMoves(
   const offlineLockBySku = await readOfflineLockBySku(sheetsClient);
   const effectiveStockBySku = computeEffectiveAvailableStock(skuWarehouseStockBySku, pendingDemandBySku, offlineLockBySku);
 
-  const candidates = computeReplenishmentCandidates(locationRows, effectiveStockBySku, cartonQtyBySku, targetZonePrefix);
+  const missingCartonSize: MissingCartonSizeRow[] = [];
+  const candidates = computeReplenishmentCandidates(locationRows, effectiveStockBySku, cartonQtyBySku, targetZonePrefix, missingCartonSize);
   const { plan, exceptions } = buildTransferPlan(runId, candidates, locationRows);
+  const missingRecordedAt = new Date().toISOString();
+  for (const row of missingCartonSize) {
+    exceptions.push({
+      runId,
+      sku: row.sku,
+      targetPosition: row.targetPosition,
+      replenishableQty: row.rawReplenishableQty,
+      warehouseRemainingQty: 0,
+      reason: `โซนวางทั้งลังได้ แต่ยังไม่มีขนาดลังใน DB_SKU_CARTON_QTY — ไม่เดาขนาดลัง (ขาดอีกต้องเติม ${row.rawReplenishableQty} ชิ้น)`,
+      recordedAt: missingRecordedAt,
+    });
+  }
 
-  if (plan.length > 0) {
+  // Never overwrite rows already imported as live BigSeller documents for
+  // this runId — re-planning the same snapshot would otherwise reset
+  // IMPORTED back to PLANNED and risk a duplicate import.
+  const existingPlan = await sheetsClient.readAll(SHEET_TRANSFER_PLAN).catch(() => []);
+  const existingHeader = existingPlan[0] ?? [];
+  const statusIdx = existingHeader.indexOf('status');
+  const runIdx = existingHeader.indexOf('runId');
+  const skuIdx = existingHeader.indexOf('sku');
+  const srcIdx = existingHeader.indexOf('sourcePosition');
+  const tgtIdx = existingHeader.indexOf('targetPosition');
+  const importedKeys = new Set<string>();
+  if ([statusIdx, runIdx, skuIdx, srcIdx, tgtIdx].every((i) => i !== -1)) {
+    for (const row of existingPlan.slice(1)) {
+      if (row[runIdx] === runId && row[statusIdx] === 'IMPORTED') {
+        importedKeys.add(`${row[runIdx]}::${row[skuIdx]}::${row[srcIdx]}::${row[tgtIdx]}`);
+      }
+    }
+  }
+  const planToWrite = plan.filter((p) => !importedKeys.has(`${p.runId}::${p.sku}::${p.sourcePosition}::${p.targetPosition}`));
+  const skippedImported = plan.length - planToWrite.length;
+  if (skippedImported > 0) {
+    await logger.info(`plan:moves: skipped ${skippedImported} row(s) already IMPORTED for runId ${runId} to avoid duplicating live transfer documents`);
+  }
+
+  if (planToWrite.length > 0) {
     await sheetsClient.upsertRows(
       SHEET_TRANSFER_PLAN,
-      plan.map((p) => ({ ...p, key: `${p.runId}::${p.sku}::${p.sourcePosition}::${p.targetPosition}` })),
+      planToWrite.map((p) => ({ ...p, key: `${p.runId}::${p.sku}::${p.sourcePosition}::${p.targetPosition}` })),
       { headers: [...TRANSFER_PLAN_HEADERS], keyColumns: ['runId', 'sku', 'sourcePosition', 'targetPosition'] },
     );
   }
@@ -595,5 +660,5 @@ export async function planMoves(
     );
   }
 
-  return { plan, exceptions };
+  return { plan: planToWrite, exceptions };
 }

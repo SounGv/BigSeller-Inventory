@@ -7,6 +7,9 @@ const LOCK_PATH = resolve('logs', 'wave-engine.lock');
 /** A lock older than this is treated as abandoned — a crashed run never gets to clean up after itself. */
 const STALE_AFTER_MS = 30 * 60 * 1000;
 
+/** How often a running engine refreshes its lock; must stay well under STALE_AFTER_MS. */
+const HEARTBEAT_MS = 5 * 60 * 1000;
+
 interface LockFile {
   pid: number;
   mode: string;
@@ -64,8 +67,24 @@ export async function acquireRunLock(mode: string): Promise<() => void> {
   }
 
   mkdirSync(dirname(LOCK_PATH), { recursive: true });
-  writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, mode, startedAt: new Date().toISOString() }, null, 2));
+  const writeLock = (): void =>
+    writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, mode, startedAt: new Date().toISOString() }, null, 2));
+  writeLock();
+
+  // Heartbeat: a long-running daemon refreshes its own timestamp so a second
+  // engine never mistakes a live lock for a stale one after STALE_AFTER_MS.
+  // Only refreshes while this process still owns the lock.
+  const heartbeat = setInterval(() => {
+    try {
+      if (readLock()?.pid === process.pid) writeLock();
+    } catch {
+      // Best effort — a missed beat is fine, the next one (or exit) corrects it.
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
+
   return () => {
+    clearInterval(heartbeat);
     // Only clear a lock this process still owns — a run that took over from a
     // stale lock must not delete a newer one.
     const current = readLock();

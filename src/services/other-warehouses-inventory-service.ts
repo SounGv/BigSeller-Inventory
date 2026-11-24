@@ -12,10 +12,11 @@ const SKU_INVENTORY_URL = process.env.BIGSELLER_SKU_INVENTORY_URL ?? 'https://ww
 /**
  * The warehouses shown in the "มูลค่าสต็อก" page besides STOCK_5 (DB_SKU_INVENTORY) and the online-sync warehouse
  * (DB_SKU_INVENTORY_DECOY). Chosen by the user on 2026-11-09 out of the 15 in BigSeller's warehouse filter; Test01 and
- * TestWave are test warehouses and deliberately left out. Each name must match the filter option's text exactly.
- * Override with OTHER_WAREHOUSES="name1,name2" — a name containing a comma is not supported.
+ * TestWave are test warehouses and deliberately left out. STOCK_4 Gifset/ของรอติด added 2026-11-11 (explicit request).
+ * Each name must match the filter option's text exactly. Override with OTHER_WAREHOUSES="name1,name2" — a name
+ * containing a comma is not supported.
  */
-export const OTHER_WAREHOUSES: string[] = (process.env.OTHER_WAREHOUSES ?? 'STOCK_1 ของหาย,STOCK_12 คลังของคืน,STOCK_14,STOCK_6 แพ็คเกจเสีย')
+export const OTHER_WAREHOUSES: string[] = (process.env.OTHER_WAREHOUSES ?? 'STOCK_1 ของหาย,STOCK_12 คลังของคืน,STOCK_14,STOCK_6 แพ็คเกจเสีย,STOCK_4 Gifset/ของรอติด')
   .split(',')
   .map((name) => name.trim())
   .filter(Boolean);

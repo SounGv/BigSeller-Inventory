@@ -1,9 +1,34 @@
 import type { Page } from '@playwright/test';
 import { dismissLanguageSwitchGuideIfPresent, clickThroughGuide } from './dismiss-language-guide.js';
+import { checkIsLoggedIn } from './auth.js';
 import { logger } from '../utils/logger.js';
 import { humanDelay } from '../utils/human-delay.js';
+import type { MoveDocumentStatus } from '../types.js';
 
 const MOVING_GOODS_URL = process.env.BIGSELLER_MOVING_GOODS_URL ?? 'https://www.bigseller.com/web/inventory/movingGoods/index.htm';
+const MOVING_PLAN_API = 'https://www.bigseller.com/api/v1/inventory/movingPlan/pageList.json';
+const MOVING_PLAN_WAREHOUSE_ID = process.env.BIGSELLER_STOCK5_WAREHOUSE_ID ?? '49484';
+
+/**
+ * `movingState` -> Thai status, confirmed live (2026-11-19) by clicking each
+ * tab on the "ย้ายสินค้า" list page and reading the `state` param BigSeller's
+ * own UI sent for `/api/v1/inventory/movingPlan/pageList.json`. NOT the same
+ * order as the tabs are displayed in the UI (รอนำเข้า, รอหยิบสินค้า,
+ * กำลังหยิบสินค้า, กำลังนำเข้าชั้นวาง, เสร็จเรียบร้อย, ยกเลิก) — do not assume
+ * 0-5 maps sequentially to that display order; re-confirm live the same way
+ * if BigSeller ever changes this.
+ */
+export const MOVING_STATE_LABELS: Record<number, MoveDocumentStatus> = {
+  0: 'รอนำเข้า',
+  1: 'รอหยิบสินค้า',
+  2: 'เสร็จเรียบร้อย',
+  3: 'ยกเลิก',
+  4: 'กำลังหยิบสินค้า',
+  5: 'กำลังนำเข้าชั้นวาง',
+};
+
+/** A document in either of these is done for good — never worth checking again. */
+export const TERMINAL_MOVE_STATUSES: ReadonlySet<MoveDocumentStatus> = new Set(['เสร็จเรียบร้อย', 'ยกเลิก']);
 
 export interface ImportZoneResult {
   ok: boolean;
@@ -150,7 +175,21 @@ export class BigSellerMovingGoodsPage {
     }
   }
 
-  /** Confirmed live (2026-08-25, see class doc comment) — modal closing = success, an error message staying visible inside it = failure. */
+  /**
+   * Confirmed live (2026-08-25, see class doc comment) — modal closing = success, an
+   * error message staying visible inside it = failure.
+   *
+   * Real bug found live (2026-10-09): the modal also disappears when the
+   * session dies mid-batch and BigSeller's SPA client-side-redirects the
+   * whole page to login.htm — the modal element is gone from the DOM either
+   * way, so the old "hidden = success" check reported a false success for
+   * every submit after the session expired. A full real-run batch logged
+   * "transfer document created" for every file while the actual "ย้ายสินค้า"
+   * list stayed completely empty ("ไม่มีข้อมูล"). After the modal closes, also
+   * confirm the session is still actually logged in via {@link checkIsLoggedIn}
+   * (the same real `/api/v1/isLogin.json` check `ensureSessionValid` uses) —
+   * a closed modal with a dead session is a failure, not a success.
+   */
   private async waitForImportResult(): Promise<ImportZoneResult> {
     const modalClosed = this.modal.waitFor({ state: 'hidden', timeout: 30_000 }).then(() => true).catch(() => false);
     const errorVisible = this.modal
@@ -162,6 +201,10 @@ export class BigSellerMovingGoodsPage {
 
     const closed = await Promise.race([modalClosed, errorVisible.then(() => false)]);
     if (closed) {
+      const stillLoggedIn = await checkIsLoggedIn(this.page).catch(() => false);
+      if (!stillLoggedIn) {
+        return { ok: false, message: 'Modal closed but the session is no longer logged in — nothing was actually submitted. Run "npm run login:bigseller" and retry.' };
+      }
       return { ok: true, message: 'Modal closed after submit — transfer document created.' };
     }
     const errorText = await this.modal.locator('.ant-form-item-explain-error, .ant-message-error').first().textContent().catch(() => null);
@@ -282,5 +325,47 @@ export class BigSellerMovingGoodsPage {
     } finally {
       await editPage.close().catch(() => undefined); // BigSeller's own save handler already closes this popup tab on success
     }
+  }
+
+  /**
+   * Looks up ONE document's current status by its exact number (e.g.
+   * "REUJR3239596") via the same `movingPlan/pageList.json` the list page's
+   * own tabs call — confirmed live (2026-11-19) that `searchType=movingNo`
+   * with the exact document number as `searchContent` returns that single
+   * document regardless of which state it's currently in (no `state` filter
+   * needed). Returns `null` if the document number is not found at all
+   * (never expected for a real document — logged as a warning so a lookup
+   * typo or a document BigSeller somehow lost isn't silently swallowed).
+   *
+   * Called directly via `page.request` — no navigation needed, so this can
+   * run back-to-back for many document numbers without reloading the list
+   * page each time. Callers should still space calls out (see
+   * transfer-status-check-service.ts) rather than firing them all at once.
+   */
+  async getStatusByMovingNo(movingNo: string): Promise<MoveDocumentStatus | null> {
+    const res = await this.page.request.post(MOVING_PLAN_API, {
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      form: {
+        pageNo: '1',
+        pageSize: '5',
+        warehouseId: MOVING_PLAN_WAREHOUSE_ID,
+        beginDate: '',
+        endDate: '',
+        days: '',
+        searchType: 'movingNo',
+        inquireType: '0',
+        searchContent: movingNo,
+        orderBy: 'createTime',
+        desc: '1',
+        state: '',
+      },
+    });
+    const json: { data?: { rows?: { movingNo: string; movingState: number }[] } } = await res.json();
+    const row = (json.data?.rows ?? []).find((r) => r.movingNo === movingNo);
+    if (!row) {
+      await logger.error(`getStatusByMovingNo(${movingNo}): not found in movingPlan/pageList.json — document may have been deleted.`);
+      return null;
+    }
+    return MOVING_STATE_LABELS[row.movingState] ?? 'ไม่ทราบ';
   }
 }

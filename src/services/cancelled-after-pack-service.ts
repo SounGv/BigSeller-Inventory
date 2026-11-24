@@ -18,6 +18,15 @@ const TABLE = 'cancelled_after_pack';
  * this sync actually passes in, so re-running it never blanks out staff
  * input. Unlike 1b, none of the three steps here are auto-detectable from
  * BigSeller — all three go through the checklist.
+ *
+ * `label_printed`/`stock_not_deducted` (added 2026-09-14) ARE auto-detected
+ * from BigSeller's own order list API on every run — see
+ * CancelledAtRiskOrderRow.stockNotDeducted. This flags the specific real
+ * failure the user reported: a wave prints a shipping label, the customer
+ * cancels before the item is actually pulled/deducted, staff don't notice,
+ * and the item goes out with the courier uncounted. Confirmed live the same
+ * day: 5 of 7 cancelled-today orders with a printed label had NOT had stock
+ * deducted.
  */
 export async function syncCancelledAfterPack(page: Page): Promise<void> {
   const start = Date.now();
@@ -27,10 +36,19 @@ export async function syncCancelledAfterPack(page: Page): Promise<void> {
   await ordersPage.goto();
   const todayRows = await ordersPage.fetchTodayCancelledRows();
 
-  const atRiskRows = todayRows.filter((r) => isAtRiskStatus(r.statusBeforeCancel));
+  // Union of the two signals: `isAtRiskStatus` is the original broad
+  // heuristic (any pre-cancel status other than New/unpaid); `stockNotDeducted`
+  // is the precise, independently-confirmed-live (2026-09-14) signal for the
+  // exact "label printed, stock never deducted" failure mode — see
+  // CancelledAtRiskOrderRow.stockNotDeducted. Kept as OR rather than
+  // replacing the status heuristic: a handful of pre-cancel statuses (e.g.
+  // "จัดส่งแล้ว") are risky even before a label-print/stock-lock mismatch
+  // would show up here.
+  const atRiskRows = todayRows.filter((r) => isAtRiskStatus(r.statusBeforeCancel) || r.stockNotDeducted);
 
+  const stockNotDeductedCount = atRiskRows.filter((r) => r.stockNotDeducted).length;
   await logger.info(
-    `syncCancelledAfterPack: ${todayRows.length} order(s) cancelled today, ${atRiskRows.length} at-risk (already packed/shipped)`,
+    `syncCancelledAfterPack: ${todayRows.length} order(s) cancelled today, ${atRiskRows.length} at-risk (already packed/shipped), ${stockNotDeductedCount} with label printed but stock not deducted`,
   );
 
   if (atRiskRows.length === 0) {
@@ -48,6 +66,8 @@ export async function syncCancelledAfterPack(page: Page): Promise<void> {
       status_before_cancel_label: r.statusBeforeCancelLabel,
       cancel_reason: r.cancelReason,
       source_url: r.sourceUrl,
+      label_printed: r.labelPrinted,
+      stock_not_deducted: r.stockNotDeducted,
       updated_at: new Date().toISOString(),
     })),
     ['order_no'],

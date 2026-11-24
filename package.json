@@ -23,8 +23,12 @@
     "sync:warehouse-stock-count": "tsx scripts/sync-warehouse-stock-count.ts",
     "sync:order-stock-check": "tsx scripts/sync-order-stock-check.ts",
     "sync:sku-inventory": "tsx scripts/sync-sku-inventory.ts",
+    "sync:decoy-warehouse-inventory": "tsx scripts/sync-decoy-warehouse-inventory.ts",
     "sync:other-warehouses-inventory": "tsx scripts/sync-other-warehouses-inventory.ts",
     "sync:stock-value-reference": "tsx scripts/sync-stock-value-reference.ts",
+    "sync:purchase-order-pending": "tsx scripts/sync-purchase-order-pending.ts",
+    "sync:order-print-alert": "tsx scripts/sync-order-print-alert.ts",
+    "check:transfer-status": "tsx scripts/check-transfer-status.ts",
     "print:com7-wave-labels": "tsx scripts/print-com7-wave-labels.ts",
     "validate:sync": "tsx scripts/validate-sync.ts",
     "plan:moves": "tsx scripts/plan-moves.ts",
@@ -39,10 +43,11 @@
     "line:status": "tsx scripts/line-status.ts",
     "import:carton-qty": "tsx scripts/import-carton-qty.ts",
     "bot:line": "tsx scripts/line-command-bot.ts",
+    "actions-api": "tsx scripts/actions-api-server.ts",
     "keep-alive": "tsx scripts/session-keeper.ts",
     "wave-engine": "tsx scripts/wave-engine.ts",
     "test": "playwright test",
-    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts tests/wave-engine-tiers.spec.ts"
+    "test:unit": "playwright test tests/replenish-formula.spec.ts tests/transfer-plan-formula.spec.ts tests/sku-sales-remark.spec.ts tests/line-notify.spec.ts tests/wave-engine-tiers.spec.ts tests/cancelled-stock-not-deducted.spec.ts tests/sales-summary-no-data.spec.ts tests/transfer-tracking.spec.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.4",

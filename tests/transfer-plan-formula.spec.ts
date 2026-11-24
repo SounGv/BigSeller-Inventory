@@ -4,7 +4,8 @@ import {
   findSourcePositions,
   buildTransferPlan,
   zoneOf,
-  roundToCartonMultiple,
+  floorToCartonMultiple,
+  ceilToCartonMultiple,
 } from '../src/services/transfer-plan-service.js';
 import { sourceAreaOf, groupBySourcePosition, chunkRows } from '../src/services/move-export-service.js';
 import type { TransferPlanRow } from '../src/types.js';
@@ -173,31 +174,53 @@ test.describe('computeReplenishmentCandidates', () => {
   });
 });
 
-test.describe('roundToCartonMultiple', () => {
-  test('rounds up when the remainder is at least half a carton', () => {
-    expect(roundToCartonMultiple(45, 10)).toBe(50);
+test.describe('floorToCartonMultiple', () => {
+  test('floors down even when the remainder is more than half a carton (source-line cap)', () => {
+    expect(floorToCartonMultiple(45, 10)).toBe(40);
   });
 
-  test('rounds down when the remainder is less than half a carton', () => {
-    expect(roundToCartonMultiple(44, 10)).toBe(40);
+  test('floors down when the remainder is less than half a carton', () => {
+    expect(floorToCartonMultiple(44, 10)).toBe(40);
   });
 
   test('an exact multiple stays unchanged', () => {
-    expect(roundToCartonMultiple(40, 10)).toBe(40);
+    expect(floorToCartonMultiple(40, 10)).toBe(40);
   });
 
-  test('exactly half rounds up (matches the user-specified tie-break)', () => {
-    expect(roundToCartonMultiple(5, 10)).toBe(10);
+  test('a large near-miss still floors down to one carton, not up to two (source cap: 90 at 88/carton -> 88)', () => {
+    expect(floorToCartonMultiple(90, 88)).toBe(88);
+  });
+
+  test('exactly half a carton still floors down, not up', () => {
+    expect(floorToCartonMultiple(5, 10)).toBe(0);
+  });
+});
+
+test.describe('ceilToCartonMultiple', () => {
+  test('rounds a short need up to one carton (2026-11-14: need 40, carton 44 → 44)', () => {
+    expect(ceilToCartonMultiple(40, 44)).toBe(44);
+  });
+
+  test('rounds a remainder up to the next carton (need 90, carton 88 → 176)', () => {
+    expect(ceilToCartonMultiple(90, 88)).toBe(176);
+  });
+
+  test('an exact multiple stays unchanged', () => {
+    expect(ceilToCartonMultiple(88, 88)).toBe(88);
+  });
+
+  test('zero or negative stays zero', () => {
+    expect(ceilToCartonMultiple(0, 10)).toBe(0);
   });
 });
 
 test.describe('computeReplenishmentCandidates — carton rounding', () => {
-  test('rounds replenishableQty to the nearest carton multiple for a carton-eligible zone (01U) when the SKU has a known carton size', () => {
+  test('ceils replenishableQty to the next carton multiple for a carton-eligible zone (01U) when the SKU has a known carton size', () => {
     const rows = [locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '50' })]; // rawReplenishableQty=45
     const cartonQty = new Map([['SKU1', 10]]);
     const candidates = computeReplenishmentCandidates(rows, skuStock(1000), cartonQty);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0].replenishableQty).toBe(50); // 45 -> nearest 10 rounds up
+    expect(candidates[0].replenishableQty).toBe(50); // 45 -> ceils up to 50 (exceeds max by less than one carton)
   });
 
   test('does not round for a non-carton-eligible zone even with a known carton size', () => {
@@ -207,18 +230,21 @@ test.describe('computeReplenishmentCandidates — carton rounding', () => {
     expect(candidates[0].replenishableQty).toBe(45); // unchanged, plain per-unit
   });
 
-  test('does not round when the SKU has no entry in the carton-quantity map', () => {
+  test('does not guess a per-unit move when the SKU has no entry in the carton-quantity map — it is listed instead', () => {
     const rows = [locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '50' })];
-    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), new Map()); // no carton data for SKU1
-    expect(candidates[0].replenishableQty).toBe(45); // unchanged
+    const missing: { sku: string; targetPosition: string; rawReplenishableQty: number }[] = [];
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), new Map(), undefined, missing);
+    expect(candidates).toHaveLength(0);
+    expect(missing).toEqual([{ sku: 'SKU1', targetPosition: '01U-01-01', rawReplenishableQty: 45 }]);
   });
 
-  test('skips the candidate entirely when rounding brings the need down to zero cartons', () => {
-    // rawReplenishableQty=3 (stockAtPosition=3, maxStock=6) clears the >=50%-of-max
-    // half-full rule on its own, but rounds down to 0 cartons at carton size 10.
-    const rows = [locationRow({ position: '01U-01-01', stockAtPosition: '3', maxStock: '6' })];
-    const cartonQty = new Map([['SKU1', 10]]);
-    expect(computeReplenishmentCandidates(rows, skuStock(1000), cartonQty)).toHaveLength(0);
+  test('a raw need under one carton is rounded up, not dropped (2026-11-14: need 40, carton 44 → 44)', () => {
+    // rawReplenishableQty=40, max=70 so 40 >= 50% of max, and 40 > MIN_REPLENISH_QTY.
+    const rows = [locationRow({ position: '01U-01-01', stockAtPosition: '30', maxStock: '70' })];
+    const cartonQty = new Map([['SKU1', 44]]);
+    const candidates = computeReplenishmentCandidates(rows, skuStock(1000), cartonQty);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].replenishableQty).toBe(44);
   });
 });
 
@@ -362,24 +388,24 @@ test.describe('buildTransferPlan', () => {
     expect(exceptions[0].targetPosition).toBe('CY-001');
   });
 
-  test('a carton-eligible target whose source can only give a part-carton amount gets NO move at all — logs an exception instead (real bug 2026-08-26: SKU with cartonQty=88 moved just 14 units, all the source had)', () => {
+  test('a target whose raw need is under one full carton is rounded up; if no source has a full carton, no move is created and an exception is logged (2026-11-14: 85 at cartonQty=88 → need 88)', () => {
     const rows = [
-      locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '90' }), // rawReplenishableQty=85 -> rounds to 88 (1 carton)
-      storageRow({ position: 'STORAGE-1', availableStock: '14', minStock: '0', maxStock: '0' }), // only 14 available, nowhere near 88
+      locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '90' }), // rawReplenishableQty=85 -> ceils to 88
+      storageRow({ position: 'STORAGE-1', availableStock: '14', minStock: '0', maxStock: '0' }),
     ];
     const cartonQty = new Map([['SKU1', 88]]);
     const candidates = computeReplenishmentCandidates(rows, skuStock(1000), cartonQty);
-    const { plan, exceptions } = buildTransferPlan('RUN1', candidates, rows);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].replenishableQty).toBe(88);
 
-    expect(plan).toHaveLength(0);
+    const { plan, exceptions } = buildTransferPlan('RUN1', candidates, rows);
+    expect(plan).toHaveLength(0); // source only has 14, less than 1 carton
     expect(exceptions).toHaveLength(1);
-    expect(exceptions[0].reason).toContain('14');
-    expect(exceptions[0].reason).toContain('88');
   });
 
   test('a carton-eligible target whose sources only TOGETHER reach a full carton gets NO move — per-line, not combined (real rule change 2026-09-08: a split like 18+2=20 used to be allowed just because the total hit a clean multiple; user rejected it live after a real document created an awkward 2-piece pickup line)', () => {
     const rows = [
-      locationRow({ position: '01U-01-01', stockAtPosition: '5', maxStock: '90' }), // rounds to 88
+      locationRow({ position: '01U-01-01', stockAtPosition: '0', maxStock: '90' }), // rawReplenishableQty=90 -> floors to 88 (1 carton)
       storageRow({ position: 'STORAGE-1', availableStock: '50', minStock: '0', maxStock: '0' }),
       storageRow({ position: 'STORAGE-2', availableStock: '40', minStock: '0', maxStock: '0' }),
     ];
@@ -492,18 +518,21 @@ test.describe('sourceAreaOf / groupBySourcePosition / chunkRows (export service)
     }
   });
 
-  test('groupBySourcePosition combines rows sharing the exact same source position, even across different target zones', () => {
+  test('groupBySourcePosition combines rows sharing the exact same source position and target row, even across different target zone labels', () => {
     // Real bug (2026-08-26): two separate documents both sourced from PC-006
     // but went to different target zones (3B-28, 3B-27) — should be one document.
+    // `targetZone` here is just the informational label; all rows share the
+    // same default targetPosition ('01U-01-01'), so they share the same
+    // target row too.
     const rows = [
       planRow({ targetZone: 'A', sourcePosition: 'PC-006' }),
-      planRow({ targetZone: 'B', sourcePosition: 'PC-006' }), // different target zone, SAME source position -> same document
+      planRow({ targetZone: 'B', sourcePosition: 'PC-006' }), // different target zone label, SAME source position + target row -> same document
       planRow({ targetZone: 'A', sourcePosition: 'PC-010' }), // different source position -> separate document
     ];
     const groups = groupBySourcePosition(rows);
     expect(groups.size).toBe(2);
-    expect(groups.get('PC-006')?.rows).toHaveLength(2);
-    expect(groups.get('PC-010')?.rows).toHaveLength(1);
+    expect(groups.get('PC-006 01U-01')?.rows).toHaveLength(2);
+    expect(groups.get('PC-010 01U-01')?.rows).toHaveLength(1);
   });
 
   test('a single replenishment target split across two different source positions lands in two documents', () => {
@@ -514,6 +543,22 @@ test.describe('sourceAreaOf / groupBySourcePosition / chunkRows (export service)
     ];
     const groups = groupBySourcePosition(rows);
     expect(groups.size).toBe(2);
+  });
+
+  test('the same source position feeding two different target rows (e.g. 3B-01 and 3B-05) splits into two documents (2026-09-15)', () => {
+    // Explicit user request: reduce staff walking on the drop-off side the
+    // same way source-position grouping already reduces it on the pull side
+    // — one document should only ever touch one pick row/aisle.
+    const rows = [
+      planRow({ sourcePosition: 'PC-006', targetPosition: '3B-01-11' }),
+      planRow({ sourcePosition: 'PC-006', targetPosition: '3B-01-44' }), // same row as above ("3B-01") -> same document
+      planRow({ sourcePosition: 'PC-006', targetPosition: '3B-05-02' }), // different row -> separate document
+    ];
+    const groups = groupBySourcePosition(rows);
+    expect(groups.size).toBe(2);
+    expect(groups.get('PC-006 3B-01')?.rows).toHaveLength(2);
+    expect(groups.get('PC-006 3B-05')?.rows).toHaveLength(1);
+    expect(groups.get('PC-006 3B-01')?.targetRow).toBe('3B-01');
   });
 
   test('chunkRows splits at the given max size', () => {

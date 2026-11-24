@@ -7,6 +7,7 @@ import { exportMoveFiles } from './move-export-service.js';
 import { validateMoveFiles } from './move-validation-service.js';
 import { importFiles, updateTransferPlanStatus } from './import-moves-service.js';
 import { notifyTransferBillCreated, type DocumentInfo } from './line-notify-service.js';
+import { recordPendingDocuments, sendTrackingPrompt } from './transfer-tracking-service.js';
 import { logger } from '../utils/logger.js';
 
 const WAREHOUSE_NAME = process.env.INVENTORY_WAREHOUSE_NAME ?? 'STOCK_5';
@@ -128,6 +129,14 @@ export async function runFullTransferPipeline(sheetsClient: SheetsClient, target
       totalMoveQty,
       documents,
     });
+
+    // Per explicit user request (2026-11-19): offer per-run status tracking
+    // right after the creation report, not on by default — see
+    // transfer-tracking-service.ts. Recorded regardless of LINE being
+    // enabled so a later `npm run check:transfer-status` always has
+    // something real to query, even if no one ever answers the prompt.
+    await recordPendingDocuments(sheetsClient, runId, documents);
+    await sendTrackingPrompt(runId, documents.length);
 
     return {
       ok: failed.length === 0,

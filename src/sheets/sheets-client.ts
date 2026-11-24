@@ -16,6 +16,8 @@ export interface UpsertOptions {
  * No credentials are ever read from source code or command-line arguments.
  */
 export class SheetsClient {
+  private readonly sheetIdCache = new Map<string, number>();
+
   private constructor(
     private readonly sheets: sheets_v4.Sheets,
     private readonly spreadsheetId: string,
@@ -93,8 +95,14 @@ export class SheetsClient {
       return;
     }
 
-    const existing = await this.readAll(sheetName);
-    const headerRow = existing[0] ?? options.headers;
+    let existing = await this.readAll(sheetName);
+    if (existing.length === 0) {
+      // A brand-new, completely empty tab has no header yet. Write it first so the
+      // first data row does not land on row 1 and get mistaken for the header.
+      await this.appendRows(sheetName, [options.headers]);
+      existing = [options.headers];
+    }
+    const headerRow = existing[0];
     const keyIndexes = options.keyColumns.map((col) => headerRow.indexOf(col));
     if (keyIndexes.some((i) => i === -1)) {
       throw new Error(`Sheet "${sheetName}" is missing one or more key columns: ${options.keyColumns.join(', ')}`);
@@ -165,6 +173,72 @@ export class SheetsClient {
       requestBody: { values },
     });
     await logger.info(`Replaced ${sheetName}: ${rows.length} row(s) written`);
+  }
+
+  private async getSheetId(sheetName: string): Promise<number> {
+    if (!this.sheetIdCache.has(sheetName)) {
+      const meta = await this.sheets.spreadsheets.get({ spreadsheetId: this.spreadsheetId });
+      for (const sheet of meta.data.sheets ?? []) {
+        const title = sheet.properties?.title;
+        const id = sheet.properties?.sheetId;
+        if (title != null && id != null) this.sheetIdCache.set(title, id);
+      }
+    }
+    const sheetId = this.sheetIdCache.get(sheetName);
+    if (sheetId === undefined) {
+      throw new Error(`Sheet "${sheetName}" not found in spreadsheet`);
+    }
+    return sheetId;
+  }
+
+  /**
+   * Deletes specific data rows from `sheetName` by 1-indexed sheet row number
+   * (header is row 1; the first data row is row 2), via the Sheets API's
+   * native `deleteDimension` — deliberately NOT `values.clear` +
+   * rewrite, because some sheets (e.g. DB_LOCATION_CURRENT) have
+   * ArrayFormula/per-row formula columns past the columns this project
+   * writes (confirmed live 2026-10-27: a "status" column sitting right after
+   * this project's own `runId` column). `deleteDimension` removes whole rows
+   * the same way a manual row-delete in the Sheets UI does, so those extra
+   * columns' formulas shift/recompute correctly instead of being wiped.
+   *
+   * `rowNumbers` need not be sorted, unique, or contiguous — they are
+   * deduped, sorted descending, and merged into contiguous ranges here, so
+   * each deletion request only ever affects rows below any row number not
+   * yet processed (never invalidating a not-yet-deleted row's number).
+   */
+  async deleteRows(sheetName: string, rowNumbers: number[]): Promise<void> {
+    if (rowNumbers.length === 0) return;
+
+    if (DRY_RUN) {
+      await logger.info(`[DRY_RUN] Would delete ${rowNumbers.length} row(s) from ${sheetName}`);
+      return;
+    }
+
+    const sheetId = await this.getSheetId(sheetName);
+    const sortedDesc = [...new Set(rowNumbers)].sort((a, b) => b - a);
+
+    const ranges: { start: number; end: number }[] = [];
+    for (const rowNumber of sortedDesc) {
+      const last = ranges[ranges.length - 1];
+      if (last && last.start === rowNumber + 1) {
+        last.start = rowNumber;
+      } else {
+        ranges.push({ start: rowNumber, end: rowNumber });
+      }
+    }
+
+    const requests = ranges.map(({ start, end }) => ({
+      deleteDimension: {
+        range: { sheetId, dimension: 'ROWS', startIndex: start - 1, endIndex: end },
+      },
+    }));
+
+    await this.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      requestBody: { requests },
+    });
+    await logger.info(`Deleted ${sortedDesc.length} row(s) from ${sheetName} (${ranges.length} range(s))`);
   }
 }
 

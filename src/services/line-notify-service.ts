@@ -205,6 +205,54 @@ export interface LineSendResult {
   errorMessage: string;
 }
 
+export interface QuickReplyOption {
+  /** Button label shown to staff — LINE caps this at 20 characters. */
+  label: string;
+  /** Exact text sent back as a normal message event when tapped — this is what a webhook command parser matches against. */
+  text: string;
+}
+
+/**
+ * Pushes one text bubble with LINE "quick reply" buttons attached — used for
+ * the post-creation "ติดตามใบย้ายนี้ไหม" prompt (see
+ * transfer-tracking-service.ts). Tapping a button sends `text` back to the
+ * bot as an ordinary text message event (handled in line-command-bot.ts),
+ * so no postback/webhook-signature plumbing beyond what already exists for
+ * plain commands is needed.
+ */
+export async function sendLineGroupMessageWithQuickReply(text: string, options: QuickReplyOption[]): Promise<LineSendResult> {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  const groupId = process.env.LINE_GROUP_ID;
+  if (!token || !groupId) {
+    return { ok: false, errorMessage: 'LINE_CHANNEL_ACCESS_TOKEN or LINE_GROUP_ID is not set in .env' };
+  }
+
+  try {
+    const res = await fetch(LINE_PUSH_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        to: groupId,
+        messages: [{
+          type: 'text',
+          text,
+          quickReply: {
+            items: options.map((o) => ({ type: 'action', action: { type: 'message', label: o.label, text: o.text } })),
+          },
+        }],
+      }),
+    });
+    const requestId = res.headers.get('x-line-request-id') ?? undefined;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { ok: false, requestId, errorMessage: `LINE API returned ${res.status}: ${body}` };
+    }
+    return { ok: true, requestId, errorMessage: '' };
+  } catch (error) {
+    return { ok: false, errorMessage: (error as Error).message };
+  }
+}
+
 /**
  * Pushes one or more plain-text bubbles to the configured group — the same
  * transport `notifyTransferBillCreated` uses for its P1-P4 breakdown, exposed

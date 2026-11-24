@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx';
 import { SheetsClient } from '../sheets/sheets-client.js';
 import type { TransferPlanRow } from '../types.js';
 import { readRowsForRunId } from './run-data.js';
+import { zoneOf } from './transfer-plan-service.js';
 import { logger } from '../utils/logger.js';
 
 const SHEET_TRANSFER_PLAN = process.env.SHEET_TRANSFER_PLAN ?? 'DB_TRANSFER_PLAN';
@@ -11,12 +12,24 @@ const WAREHOUSE_NAME = process.env.INVENTORY_WAREHOUSE_NAME ?? 'STOCK_5';
 const OUTPUT_DIR = process.env.MOVE_OUTPUT_DIR ?? 'output/move-import';
 
 // Confirmed byte-for-byte from the real template BigSeller itself serves
-// (`/static/importTemplate/movingPlan/zone/นำเข้าเพื่อสร้างใบย้ายสินค้า_th.xlsx`,
-// downloaded and inspected 2026-08-25). Hardcoded rather than reading the
-// template file at runtime so this never risks touching — or breaking if
-// someone moves/renames — the original template on disk.
+// (`/static/importTemplate/movingPlan/zone/นำเข้าเพื่อสร้างใบย้ายสินค้า_th.xlsx`).
+// Hardcoded rather than reading the template file at runtime so this never
+// risks touching — or breaking if someone moves/renames — the original
+// template on disk.
+//
+// Re-confirmed live 2026-10-09 after a BigSeller platform update silently
+// changed this template (real incident: every file in a ~90-document batch
+// got "Modal closed after submit" with no error, but the real "ย้ายสินค้า"
+// list stayed completely empty — a SEPARATE bug, a dead session mid-batch,
+// masked this one too, see moving-goods-page.ts). BigSeller inserted a new
+// optional "*GTIN（...）" column right after SKU, shifting every position/qty
+// column one slot right of what this file used to send — if the importer
+// matches columns by position rather than header name, every column from
+// position onward would have landed one slot off. Left blank here (this
+// project only ever keys by SKU, never GTIN).
 export const MOVE_IMPORT_HEADERS = [
-  '*เลข SKU (จำเป็นต้องกรอก)',
+  '*เลข SKU（กรอกเลข SKU หรือ GTIN อย่างใดอย่างหนึ่ง）',
+  '*GTIN（กรอกเลข SKU หรือ GTIN อย่างใดอย่างหนึ่ง）',
   '*ตำแหน่งที่ย้ายออก (จำเป็นต้องกรอก)',
   '*จำนวนสินค้าที่ย้ายออก (จำเป็นต้องกรอก)',
   '*ตำแหน่งที่ย้ายเข้า (จำเป็นต้องกรอก)',
@@ -27,9 +40,11 @@ export const MOVE_IMPORT_HEADERS = [
 export const MAX_ROWS_PER_IMPORT_FILE = 5000;
 
 export interface ZoneFile {
-  /** The grouping key for this file — the exact source position, e.g. "PC-006" (see groupBySourcePosition below). Kept as `zone` for minimal disruption to callers (DocumentInfo, LINE notification) that already expect this field name. */
+  /** The exact source position, e.g. "PC-006" (see groupBySourcePosition below). Kept as `zone` for minimal disruption to callers (DocumentInfo, LINE notification, MOVE_ZONE_FILTER) that already expect this field name and filter/group by source position — a source position can now legitimately produce more than one file (one per targetRow), and all of them keep the same `zone`. */
   zone: string;
   sourceArea: string;
+  /** The pick-position row/aisle this file is scoped to, e.g. "3B-01" (see groupBySourcePosition below). */
+  targetRow: string;
   filePath: string;
   rowCount: number;
   rows: TransferPlanRow[];
@@ -62,29 +77,43 @@ export function sourceAreaOf(sourcePosition: string): string {
 }
 
 /**
- * Groups plan rows by the EXACT source position — per explicit follow-up
- * request (2026-08-26), replacing the earlier (targetZone, sourceArea)
- * grouping: "ถ้าตำแหน่งเก็บเดียวกันให้สร้างรวมใบเดียวกันได้ ... เพราะเวลาพนักงาน
- * เดินจัดของจะได้เดินไปทำทีละตำแหน่งจัดเก็บ" (if it's the same storage
- * position, combine into one document — staff walk to each storage position
- * one at a time and handle everything for it in one visit). Confirmed live:
- * two real documents both sourcing from PC-006 but going to different target
- * zones (3B-28, 3B-27) should have been ONE document, not two — grouping by
- * target zone was making staff revisit the same storage bin across separate
- * trips. A document can now legitimately carry more than one target
- * position/zone; that's fine, since staff are already standing at the one
- * source position gathering everything before heading out to drop it off.
+ * Groups plan rows by (exact source position, target row) — source-position
+ * grouping per explicit follow-up request (2026-08-26): "ถ้าตำแหน่งเก็บเดียวกัน
+ * ให้สร้างรวมใบเดียวกันได้ ... เพราะเวลาพนักงานเดินจัดของจะได้เดินไปทำทีละตำแหน่ง
+ * จัดเก็บ" (if it's the same storage position, combine into one document —
+ * staff walk to each storage position one at a time and handle everything for
+ * it in one visit). Confirmed live: two real documents both sourcing from
+ * PC-006 but going to different target zones (3B-28, 3B-27) should have been
+ * ONE document, not two — grouping by target zone was making staff revisit
+ * the same storage bin across separate trips.
+ *
+ * Target-row splitting added 2026-09-15 per explicit user request: the same
+ * one-trip-per-physical-location logic applies on the drop-off side too — if
+ * one source position's stock needs to land in several different pick rows
+ * (e.g. both 3B-01 and 3B-05), that's still split into separate documents,
+ * one per row, so staff filling pick positions only ever work one row at a
+ * time instead of carrying stock back and forth between rows while working a
+ * single document. `targetRow` reuses `zoneOf()` (position minus its last
+ * "-NN" segment, e.g. "3B-01-11" -> "3B-01") — the same row/aisle prefix
+ * already used to stamp `targetZone`. A document can still carry more than
+ * one SKU/exact target position, as long as they share both the source
+ * position and the target row.
  */
-export function groupBySourcePosition(plan: TransferPlanRow[]): Map<string, { sourcePosition: string; sourceArea: string; rows: TransferPlanRow[] }> {
-  const groups = new Map<string, { sourcePosition: string; sourceArea: string; rows: TransferPlanRow[] }>();
+export function groupBySourcePosition(
+  plan: TransferPlanRow[],
+): Map<string, { sourcePosition: string; sourceArea: string; targetRow: string; rows: TransferPlanRow[] }> {
+  const groups = new Map<string, { sourcePosition: string; sourceArea: string; targetRow: string; rows: TransferPlanRow[] }>();
   for (const row of plan) {
-    const group = groups.get(row.sourcePosition) ?? {
+    const targetRow = zoneOf(row.targetPosition);
+    const key = `${row.sourcePosition} ${targetRow}`;
+    const group = groups.get(key) ?? {
       sourcePosition: row.sourcePosition,
       sourceArea: sourceAreaOf(row.sourcePosition),
+      targetRow,
       rows: [],
     };
     group.rows.push(row);
-    groups.set(row.sourcePosition, group);
+    groups.set(key, group);
   }
   return groups;
 }
@@ -98,7 +127,7 @@ export function chunkRows<T>(rows: T[], maxSize: number = MAX_ROWS_PER_IMPORT_FI
 }
 
 function toImportRow(row: TransferPlanRow): (string | number)[] {
-  return [row.sku, row.sourcePosition, row.sourceQty, row.targetPosition, row.targetQty];
+  return [row.sku, '', row.sourcePosition, row.sourceQty, row.targetPosition, row.targetQty];
 }
 
 function writeXlsx(filePath: string, rows: TransferPlanRow[]): void {
@@ -137,15 +166,16 @@ export async function exportMoveFiles(sheetsClient: SheetsClient, runId: string,
   await mkdir(outDir, { recursive: true });
 
   const files: ZoneFile[] = [];
-  for (const { sourcePosition, sourceArea, rows: groupRows } of groupBySourcePosition(plan).values()) {
+  for (const { sourcePosition, sourceArea, targetRow, rows: groupRows } of groupBySourcePosition(plan).values()) {
     const chunks = chunkRows(groupRows);
     chunks.forEach((chunk, i) => {
       const partSuffix = chunks.length > 1 ? `_part${i + 1}` : '';
       const safePosition = sourcePosition.replace(/[\\/:*?"<>|]/g, '_');
       const safeArea = sourceArea.replace(/[\\/:*?"<>|]/g, '_');
-      const filePath = path.join(outDir, `MOVE_${WAREHOUSE_NAME}_${safeArea}_${safePosition}_${dateStamp}${partSuffix}.xlsx`);
+      const safeTargetRow = targetRow.replace(/[\\/:*?"<>|]/g, '_');
+      const filePath = path.join(outDir, `MOVE_${WAREHOUSE_NAME}_${safeArea}_${safePosition}_${safeTargetRow}_${dateStamp}${partSuffix}.xlsx`);
       writeXlsx(filePath, chunk);
-      files.push({ zone: sourcePosition, sourceArea, filePath, rowCount: chunk.length, rows: chunk });
+      files.push({ zone: sourcePosition, sourceArea, targetRow, filePath, rowCount: chunk.length, rows: chunk });
     });
   }
 

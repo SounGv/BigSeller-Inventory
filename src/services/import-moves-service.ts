@@ -44,6 +44,9 @@ export async function importFiles(
   const results: ImportFileResult[] = [];
   const documents: DocumentInfo[] = [];
   const setSalesRemark = (process.env.SET_SALES_REMARK ?? 'true').toLowerCase() === 'true';
+  // Optional prefix for the document remark (หมายเหตุ). Empty by default so
+  // normal runs are unchanged. Example: REMARK_PREFIX=ทดสอบ บอท
+  const remarkPrefix = (process.env.REMARK_PREFIX ?? '').trim();
 
   await withBigSellerPage('import-moves', async (page) => {
     const movingGoodsPage = new BigSellerMovingGoodsPage(page);
@@ -143,6 +146,15 @@ export async function importFiles(
           { job: 'import-moves', url: page.url(), step: 'importZoneFile', errorMessage: `${file.filePath}: ${result.message}`, runId },
           sheetsClient,
         );
+        // Real incident (2026-10-09): a dead session fails every remaining file
+        // the exact same way — grinding through the rest of a large batch just
+        // wastes time (and looks like the whole run is "stuck" to anyone
+        // watching the browser). Stop immediately so the caller can report a
+        // clean "re-login and retry the rest" instead of N identical failures.
+        if (result.message.includes('no longer logged in')) {
+          await logger.error(`import-moves: stopping early — session died at ${file.filePath}, ${orderedFiles.length - orderedFiles.indexOf(file) - 1} file(s) not yet attempted`);
+          break;
+        }
       } else {
         let docNumber: string | null = null;
         try {
@@ -156,10 +168,11 @@ export async function importFiles(
         const score = salesBySku ? Math.max(0, ...file.rows.map((r) => salesBySku!.get(r.sku) ?? 0)) : 0;
         documents.push({ documentNumber: docNumber ?? 'ไม่ทราบเลขที่', zone: file.zone, score });
 
-        if (salesBySku && docNumber) {
+        if ((salesBySku || remarkPrefix) && docNumber) {
           try {
             const priority = priorityByFilePath.get(file.filePath) ?? 4;
-            const remark = buildPriorityRemark(priority, score);
+            const baseRemark = salesBySku ? buildPriorityRemark(priority, score) : '';
+            const remark = [remarkPrefix, baseRemark].filter(Boolean).join(' | ');
             await movingGoodsPage.setRemarkOnMostRecentDocument(remark);
           } catch (error) {
             await logger.error(`setRemarkOnMostRecentDocument failed for ${file.filePath}: ${(error as Error).message}`);

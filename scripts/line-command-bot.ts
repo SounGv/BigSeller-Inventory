@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { SheetsClient } from '../src/sheets/sheets-client.js';
 import { runFullTransferPipeline } from '../src/services/transfer-command-service.js';
 import { sendLineGroupMessages } from '../src/services/line-notify-service.js';
+import { applyTrackDecision } from '../src/services/transfer-tracking-service.js';
 import { logger } from '../src/utils/logger.js';
 
 const PORT = Number(process.env.LINE_COMMAND_BOT_PORT ?? 3001);
@@ -100,6 +101,22 @@ function extractZonePrefix(text: string): string | undefined {
   return match ? match[0].toUpperCase() : undefined;
 }
 
+/**
+ * Matches the exact quick-reply button text sendTrackingPrompt() sends
+ * (transfer-tracking-service.ts): "ติดตามใบย้าย <runId>" / "ไม่ติดตามใบย้าย
+ * <runId>". Checked BEFORE matchesTriggerKeyword() below — "ไม่ติดตามใบย้าย"
+ * and "ติดตามใบย้าย" both contain "ใบย้าย", which would otherwise also match
+ * the plain "create a transfer bill" trigger and start a brand new pipeline
+ * run instead of recording the tracking decision.
+ */
+function parseTrackCommand(text: string): { decision: 'yes' | 'no'; runId: string } | null {
+  const no = text.match(/^ไม่ติดตามใบย้าย\s+(\S+)$/);
+  if (no) return { decision: 'no', runId: no[1] };
+  const yes = text.match(/^ติดตามใบย้าย\s+(\S+)$/);
+  if (yes) return { decision: 'yes', runId: yes[1] };
+  return null;
+}
+
 async function runPipelineAndReport(targetZonePrefix?: string): Promise<void> {
   if (pipelineInFlight) return; // guarded by caller, but stay safe if called twice
   pipelineInFlight = true;
@@ -178,6 +195,20 @@ const server = createServer((req, res) => {
       if (!userId || !ALLOWED_USER_IDS.has(userId)) {
         await logger.info(`line-command-bot: ignored command from non-whitelisted userId ${userId ?? '(unknown)'}`);
         await replyText(replyToken, `ขออภัยครับ คุณไม่มีสิทธิ์สั่งงานนี้ — ติดต่อแอดมินหากต้องการสิทธิ์`);
+        continue;
+      }
+
+      const trackCommand = parseTrackCommand(event.message.text.trim());
+      if (trackCommand) {
+        const sheetsClient = await SheetsClient.create();
+        const result = await applyTrackDecision(sheetsClient, trackCommand.runId, trackCommand.decision);
+        if (!result) {
+          await replyText(replyToken, `ไม่พบใบย้ายของ runId "${trackCommand.runId}" ครับ (อาจเป็นปุ่มเก่าจากข้อความก่อนหน้า)`);
+        } else if (result.decision === 'yes') {
+          await replyText(replyToken, `รับทราบครับ จะติดตาม ${result.documentCount} ใบนี้ให้ แล้วแจ้งผลกลับเป็นระยะ`);
+        } else {
+          await replyText(replyToken, `รับทราบครับ ไม่ติดตามใบย้ายชุดนี้`);
+        }
         continue;
       }
 

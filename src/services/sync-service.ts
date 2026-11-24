@@ -42,6 +42,28 @@ function assertReasonableRowCount(newCount: number, previousCount: number): void
   }
 }
 
+/**
+ * Real bug found live 2026-09-15: SHEET_LOCATION_CURRENT is shared by two
+ * different callers — `syncInventory` (pick positions only) and
+ * `syncLocationAllTypes` (pick + storage positions combined) — and
+ * `upsertRows` never deletes rows, so whichever ran last leaves its rows
+ * sitting there even if the OTHER one runs next with a narrower scope.
+ * Comparing a pick-only fresh scrape against the sheet's raw total row count
+ * (pick + stale leftover storage rows from a previous combined run) is an
+ * apples-to-oranges comparison that fails `assertReasonableRowCount` even
+ * when the pick-position count is perfectly healthy (confirmed live: fresh
+ * pick-only scrape 1593 vs previous pick-only baseline 1963 — a fine 81%,
+ * while the raw sheet total was an unrelated 3712 that also included 1749
+ * leftover storage rows). Scope the "previous" count to the same
+ * `positionType`(s) actually present in this run's fresh rows.
+ */
+function countMatchingPositionTypes(existingRows: string[][], positionTypes: ReadonlySet<string>): number {
+  if (existingRows.length === 0) return 0;
+  const positionTypeIdx = existingRows[0].indexOf('positionType');
+  if (positionTypeIdx === -1) return Math.max(0, existingRows.length - 1); // header missing/unexpected — fall back to the old, coarser check
+  return existingRows.slice(1).filter((row) => positionTypes.has(row[positionTypeIdx])).length;
+}
+
 export async function logError(entry: Omit<ErrorLogEntry, 'timestamp'>, sheetsClient: SheetsClient): Promise<void> {
   const fullEntry: ErrorLogEntry = { ...entry, timestamp: new Date().toISOString() };
   await logger.error(JSON.stringify(fullEntry));
@@ -76,9 +98,45 @@ async function scrapeLocationRows(page: Page, warehouse: string, positionType: s
   return inventoryPage.exportAllRows();
 }
 
+/**
+ * Row numbers (1-indexed, header = row 1) of existing DB_LOCATION_CURRENT
+ * rows that are in-scope for this run's position type(s) but whose key no
+ * longer appears in the fresh scrape — i.e. the SKU has moved off that
+ * position entirely. `existingCurrent` must be the read taken BEFORE
+ * `upsertRows` ran: upsert only overwrites matched keys in place and appends
+ * new ones, so it never shifts or invalidates these row numbers, and a stale
+ * key (by definition not present in `freshRows`) is never one upsert touched.
+ */
+function findStaleRowNumbers(
+  existingCurrent: string[][],
+  freshRows: InventoryRow[],
+  positionTypesInThisRun: ReadonlySet<string>,
+): number[] {
+  if (existingCurrent.length === 0) return [];
+  const header = existingCurrent[0];
+  const col = (name: string) => header.indexOf(name);
+  const skuIdx = col('sku');
+  const warehouseIdx = col('warehouse');
+  const areaIdx = col('area');
+  const positionIdx = col('position');
+  const positionTypeIdx = col('positionType');
+  if ([skuIdx, warehouseIdx, areaIdx, positionIdx, positionTypeIdx].some((i) => i === -1)) return [];
+
+  const freshKeys = new Set(freshRows.map(inventoryRowKey));
+  const staleRowNumbers: number[] = [];
+  existingCurrent.slice(1).forEach((row, idx) => {
+    const positionType = row[positionTypeIdx] ?? '';
+    if (!positionTypesInThisRun.has(positionType)) return; // out of scope for this run — leave untouched
+    const key = [row[skuIdx], row[warehouseIdx], row[areaIdx], row[positionIdx], positionType].join('::');
+    if (!freshKeys.has(key)) staleRowNumbers.push(idx + 2); // +2: 1-indexed sheet rows, plus header row
+  });
+  return staleRowNumbers;
+}
+
 async function writeLocationRows(sheetsClient: SheetsClient, rows: InventoryRow[], runId: string): Promise<void> {
   const existingCurrent = await sheetsClient.readAll(SHEET_LOCATION_CURRENT).catch(() => []);
-  assertReasonableRowCount(rows.length, Math.max(0, existingCurrent.length - 1));
+  const positionTypesInThisRun = new Set(rows.map((r) => r.positionType));
+  assertReasonableRowCount(rows.length, countMatchingPositionTypes(existingCurrent, positionTypesInThisRun));
 
   const snapshotDate = new Date().toISOString();
   const snapshotRows = rows.map((r) => [
@@ -95,6 +153,14 @@ async function writeLocationRows(sheetsClient: SheetsClient, rows: InventoryRow[
     currentRecords,
     { headers: [...INVENTORY_HEADERS], keyColumns: ['sku', 'warehouse', 'area', 'position', 'positionType'] },
   );
+
+  // Remove positions this run's scrape no longer sees for its position
+  // type(s) — upsertRows above only ever updates-or-appends, so without this
+  // a vacated position's old row sits forever (see findStaleRowNumbers doc
+  // comment; this is what let DB_LOCATION_CURRENT balloon to ~2x the real
+  // live row count and produced false duplicate-position reads downstream).
+  const staleRowNumbers = findStaleRowNumbers(existingCurrent, rows, positionTypesInThisRun);
+  await sheetsClient.deleteRows(SHEET_LOCATION_CURRENT, staleRowNumbers);
 }
 
 /**

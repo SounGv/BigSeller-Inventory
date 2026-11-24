@@ -16,12 +16,21 @@ const ORDER_LIST_API = 'https://www.bigseller.com/api/v1/order/new/pageList.json
  */
 const SAFE_BEFORE_CANCEL_STATUSES = new Set(['New', 'new', 'unpaid']);
 
+export interface OrderItemApiRow {
+  quantity: number;
+  allocated: number | null;
+  refundQuantity: number | null;
+}
+
 interface OrderApiRow {
   packageNo: string;
   cancelTimeStr: string | null;
   inCancelBeforeStatus: string | null;
   multilingualCancelBeforeStatus: string | null;
   cancelReason: string | null;
+  printLabelMark: number | null;
+  printShipLabelMark: number | null;
+  orderItemList: OrderItemApiRow[] | null;
 }
 
 interface OrderListApiResponse {
@@ -42,6 +51,22 @@ export interface CancelledAtRiskOrderRow {
   statusBeforeCancelLabel: string;
   cancelReason: string;
   sourceUrl: string;
+  /** `printLabelMark`/`printShipLabelMark` from the API, either flag set. */
+  labelPrinted: boolean;
+  /**
+   * True when the shipping label was printed but at least one line item's
+   * `allocated` (BigSeller's own "ล็อคแล้ว/ตัด" count) is still short of
+   * `quantity - refundQuantity` (the "ต้องการล็อค/ตัดสต๊อก" count) — i.e. the
+   * exact failure mode reported live 2026-09-14: a wave gets a label printed,
+   * the customer cancels before pick/pack finishes, staff never notices, and
+   * the item goes out with the courier without ever being deducted from
+   * stock. Confirmed live same day: `order/new/pageList.json`'s
+   * `orderItemList[].allocated` is the same number the order-detail page
+   * shows as "ล็อคแล้ว/ตัด" (verified against real orders BSUJR3N91533
+   * allocated=0/quantity=1 "not deducted" and BSUJR3N90980 allocated=1/
+   * quantity=1 "deducted OK") — no need to open each order's detail page.
+   */
+  stockNotDeducted: boolean;
 }
 
 /**
@@ -136,12 +161,28 @@ export class BigSellerCancelledOrdersPage {
       statusBeforeCancelLabel: r.multilingualCancelBeforeStatus ?? '',
       cancelReason: r.cancelReason ?? '',
       sourceUrl: CANCELLED_ORDERS_URL,
+      labelPrinted: r.printLabelMark === 1 || r.printShipLabelMark === 1,
+      stockNotDeducted: hasUndeductedStock(r),
     }));
   }
 }
 
 export function isAtRiskStatus(statusBeforeCancel: string): boolean {
   return !SAFE_BEFORE_CANCEL_STATUSES.has(statusBeforeCancel);
+}
+
+/** See `CancelledAtRiskOrderRow.stockNotDeducted` for how this was confirmed live. */
+export function hasUndeductedStock(r: {
+  printLabelMark: number | null;
+  printShipLabelMark: number | null;
+  orderItemList: OrderItemApiRow[] | null;
+}): boolean {
+  const labelPrinted = r.printLabelMark === 1 || r.printShipLabelMark === 1;
+  if (!labelPrinted) return false;
+  return (r.orderItemList ?? []).some((item) => {
+    const needed = item.quantity - (item.refundQuantity ?? 0);
+    return (item.allocated ?? 0) < needed;
+  });
 }
 
 /**
