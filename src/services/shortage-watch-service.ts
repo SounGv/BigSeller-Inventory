@@ -287,7 +287,7 @@ function canSendLine(): boolean {
  * inside the already-logged-in page so the saved session is reused. Returns raw
  * rows only; every calculation happens in the pure functions above.
  */
-async function fetchSnapshot(page: Page): Promise<{ pos: ShelfRow[]; orders: RawOrder[] }> {
+export async function fetchSnapshot(page: Page): Promise<{ pos: ShelfRow[]; orders: RawOrder[] }> {
   const browserCode = `(async (cfg) => {
     const post = async (url, body, ct) => { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': ct }, body }); return r.json(); };
     const pos = []; let pg = 1, tp = 1;
