@@ -16,6 +16,7 @@ import {
 const shelf = (over: Partial<ShelfRow>): ShelfRow => ({ sku: 'A', shelfType: 0, shelfName: 'P-01', onhand: 10, available: 10, ...over });
 
 const order = (over: Partial<RawOrder> & { items?: RawOrder['items'] }): RawOrder => ({
+  platform: 'shopee',
   warehouseId: 49484,
   shipmentWarehouse: 'STOCK_5',
   carrier: 'Shopee-TH-SPX Express',
@@ -54,6 +55,17 @@ test.describe('buildDemand — only what BigSeller has not locked yet', () => {
     ]);
     expect(d.demand['A']).toBe(3);
     expect(d.ordersUsed).toBe(2);
+  });
+  test('only Shopee / Lazada / TikTok orders count; manual and other platforms are ignored', () => {
+    const d = buildDemand([
+      order({ platform: 'shopee', items: [item('A', 1)] }),
+      order({ platform: 'Lazada', items: [item('A', 2)] }),
+      order({ platform: 'tiktok', items: [item('A', 4)] }),
+      order({ platform: 'manual', items: [item('A', 100)] }),
+      order({ platform: undefined, items: [item('A', 200)] }),
+    ]);
+    expect(d.demand['A']).toBe(7);
+    expect(d.ordersUsed).toBe(3);
   });
   test('a bundle line is split into its child SKUs x num x remaining quantity', () => {
     const d = buildDemand([

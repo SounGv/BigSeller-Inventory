@@ -27,6 +27,8 @@ const STOCK5_WAREHOUSE_NAME = process.env.INVENTORY_WAREHOUSE_NAME ?? 'STOCK_5';
 
 /** Carrier names that mean "ship first" — BigSeller gives no deadline, so the carrier name is the signal. SPX Express / J&T / Flash / KEX / LEX / Seller Delivery are NOT urgent. */
 export const URGENT_CARRIER = /Instant|ส่งทันที|Express Delivery|SHP Food|Food|Lalamove|Grab/i;
+/** Only online-marketplace orders are counted (user rule, 25/11): any other platform (manual, Com7 PO, Seller Delivery, ...) is ignored. */
+export const ONLINE_PLATFORM = /^(shopee|lazada|tiktok)$/i;
 const PREALERT_CAP = 15;
 const SEPARATOR = '━━━━━━━━━━━━━━';
 
@@ -130,6 +132,7 @@ export function buildDemand(orders: RawOrder[], warehouseId = STOCK5_WAREHOUSE_I
 
   for (const o of orders) {
     if (o.warehouseId !== warehouseId && o.shipmentWarehouse !== warehouseName) continue;
+    if (!ONLINE_PLATFORM.test(o.platform ?? '')) continue;
     ordersUsed++;
     const isUrgent = URGENT_CARRIER.test(`${o.carrier} ${o.option}`);
     if (isUrgent) urgentOrders++;
