@@ -186,6 +186,15 @@ export function urgentShortagesOnly(shortages: Shortage[]): Shortage[] {
 }
 
 /**
+ * Pure: leave out SKUs that have stock in a damaged / buffer position (shelfType 2). That stock waits for the staff to
+ * confirm the order; once the order lands in the "ของขาด" tab the buffer job moves it to the pick position and
+ * announces it, so a pre-alert would only send people looking for stock that is already available (user rule, 25/11).
+ */
+export function excludeBufferSkus(shortages: Shortage[], stock: Record<string, StockEntry>): Shortage[] {
+  return shortages.filter((s) => (stock[s.sku]?.damOn ?? 0) <= 0);
+}
+
+/**
  * Pure: one SKU is announced once per day. Every SKU that was new this round is
  * remembered — including any beyond the 15 shown, which the message points to
  * the sheet for (same as the older routine). `limit` (> 0) caps how many are
@@ -359,7 +368,8 @@ export async function runShortageWatchRound(page: Page): Promise<void> {
 
   const d = buildDemand(orders);
   const shortages = findShortages(d, stock);
-  const urgentShortages = urgentShortagesOnly(shortages);
+  const urgentWithBuffer = urgentShortagesOnly(shortages);
+  const urgentShortages = excludeBufferSkus(urgentWithBuffer, stock);
 
   const state = loadWatchState();
   const plan = planPrealert(urgentShortages, state, bangkokParts(now).date, testLimit);
@@ -370,7 +380,7 @@ export async function runShortageWatchRound(page: Page): Promise<void> {
     `shortage-watch report: rows_in=${orders.length} (tab ของขาด=${orders.filter((o) => o.tab === '4').length}) orders_used(STOCK_5)=${d.ordersUsed} urgent_orders=${d.urgentOrders} ` +
       `skus_with_demand=${Object.keys(d.demand).length} matched=${Object.keys(d.demand).length - skusWithoutStockRow} ` +
       `null_count(no stock row)=${skusWithoutStockRow} stock_skus=${Object.keys(stock).length} positions=${pos.length} ` +
-      `shortages_all=${shortages.length} shortages_urgent=${urgentShortages.length} to_alert=${plan.toAlert.length} ` +
+      `shortages_all=${shortages.length} shortages_urgent=${urgentWithBuffer.length} skipped(has buffer)=${urgentWithBuffer.length - urgentShortages.length} to_alert=${plan.toAlert.length} ` +
       `skipped(already announced today)=${plan.alreadyAlertedCount} dry_run=${DRY_RUN} line_enabled=${NOTIFY_ENABLED}`,
   );
   await logger.info(`shortage-watch sample_diff: ${JSON.stringify(plan.toAlert.slice(0, 5))}`);

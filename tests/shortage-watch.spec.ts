@@ -3,6 +3,7 @@ import {
   buildDemand,
   buildPrealertMessage,
   buildStockBySku,
+  excludeBufferSkus,
   findShortages,
   formatNowText,
   isWithinWatchHours,
@@ -84,6 +85,19 @@ test.describe('buildDemand — only what BigSeller has not locked yet', () => {
     expect(d.urgent['A']).toBe(5);
     expect(d.urgentOrders).toBe(2);
     expect(Object.keys(d.urgentBy['A']).sort()).toEqual(['Express Delivery (SPX)', 'Grab']);
+  });
+});
+
+test.describe('excludeBufferSkus — SKUs with buffer stock are not pre-alerted', () => {
+  test('a short SKU with damaged-position stock is left out; one without it stays', () => {
+    const stock = buildStockBySku([
+      shelf({ sku: 'WITH', available: 0, onhand: 0 }),
+      shelf({ sku: 'WITH', shelfType: 2, shelfName: 'P/01', onhand: 27, available: 27 }),
+      shelf({ sku: 'WITHOUT', available: 0, onhand: 0 }),
+    ]);
+    const d = buildDemand([order({ items: [item('WITH', 1), item('WITHOUT', 1), item('NOROW', 1)] })]);
+    const kept = excludeBufferSkus(findShortages(d, stock), stock);
+    expect(kept.map((x) => x.sku).sort()).toEqual(['NOROW', 'WITHOUT']);
   });
 });
 
